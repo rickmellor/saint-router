@@ -42,8 +42,9 @@ async def test_call_openai_compatible_with_base_url(local_backend):
     with patch("goorouter.backends.litellm.acompletion", mock):
         await call_backend(local_backend, messages=[{"role": "user", "content": "x"}], stream=False)
     _, kwargs = mock.call_args
-    # OpenAI-compatible: just the model name (no provider prefix)
-    assert kwargs["model"] == "qwen2.5-3b-instruct"
+    # OpenAI-compatible endpoints (LM Studio, vLLM, OpenRouter, etc.) need the
+    # explicit "openai/" prefix; LiteLLM does NOT infer the provider from api_base.
+    assert kwargs["model"] == "openai/qwen2.5-3b-instruct"
     assert kwargs["api_base"] == "http://localhost:1234/v1"
     assert kwargs["api_key"] == "lm-studio"
 

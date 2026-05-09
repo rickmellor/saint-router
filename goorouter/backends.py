@@ -17,10 +17,20 @@ def _resolve_api_key(b: BackendConfig) -> str | None:
 
 
 def _resolve_model_id(b: BackendConfig) -> str:
-    """Translate (provider, model) → litellm model id."""
+    """Translate (provider, model) → litellm model id.
+
+    LiteLLM requires an explicit provider prefix on the model name; it does NOT
+    infer the provider from `api_base` alone. Without a prefix, LiteLLM raises
+    `BadRequestError: LLM Provider NOT provided` (and prints a "Provider List"
+    link to its docs). We always prefix.
+    """
     if b.provider == "anthropic":
         return f"anthropic/{b.model}"
-    # OpenAI-compatible: use bare model name; api_base directs the call
+    if b.provider == "openai":
+        # Works for OpenAI itself AND any OpenAI-compatible endpoint reached via
+        # api_base (LM Studio, OpenRouter, vLLM, llama.cpp server, etc.).
+        return f"openai/{b.model}"
+    # Unknown provider: pass through as-is and let the user/LiteLLM error speak.
     return b.model
 
 
