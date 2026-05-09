@@ -13,38 +13,55 @@ from goorouter.backends import call_backend
 from goorouter.config import BackendConfig
 
 
-def _extract_litellm_detail(err: BaseException) -> str:
-    """Walk an exception chain looking for LiteLLM/httpx attributes worth showing.
+def _truncate(value: object, limit: int = 500) -> str:
+    s = str(value)
+    return s if len(s) <= limit else s[:limit] + "...(truncated)"
 
-    LiteLLM wraps provider responses in BadRequestError / APIError with
+
+def _extract_litellm_detail(err: BaseException) -> str:
+    """Walk an exception chain looking for HTTP-level diagnostic info.
+
+    LiteLLM wraps provider exceptions in BadRequestError / APIError with
     attributes like `.status_code`, `.message`, `.response`, `.body` —
-    most of which `str(err)` doesn't print. Pull whatever's there so the
-    user sees the actual HTTP response that confused us.
+    most of which `str(err)` doesn't print. Pull whatever's there. Dedupe
+    repeats (LiteLLM re-wraps multiple times along the chain).
     """
+    seen_keys: set[tuple[str, str]] = set()
     parts: list[str] = []
-    seen: set[int] = set()
+
+    def _add(label: str, value: object) -> None:
+        if value is None or value == "":
+            return
+        s = _truncate(value)
+        key = (label, s)
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        parts.append(f"{label}={s}")
+
+    seen_excs: set[int] = set()
     cur: BaseException | None = err
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        status = getattr(cur, "status_code", None)
-        if status is not None:
-            parts.append(f"status={status}")
-        # LiteLLM often stashes the upstream response body in .body or .message
-        body = getattr(cur, "body", None) or getattr(cur, "response_text", None)
-        if body:
-            body_str = str(body)
-            if len(body_str) > 500:
-                body_str = body_str[:500] + "...(truncated)"
-            parts.append(f"body={body_str}")
-        # The httpx Response, if attached
+    while cur is not None and id(cur) not in seen_excs:
+        seen_excs.add(id(cur))
+        _add("status", getattr(cur, "status_code", None))
+        _add("body", getattr(cur, "body", None) or getattr(cur, "response_text", None))
+        # LiteLLM-specific
+        _add("provider", getattr(cur, "llm_provider", None))
+        _add("model", getattr(cur, "model", None))
+        # httpx Response attached as .response
         resp = getattr(cur, "response", None)
         if resp is not None:
             text = getattr(resp, "text", None)
             if text:
-                text_str = str(text)
-                if len(text_str) > 500:
-                    text_str = text_str[:500] + "...(truncated)"
-                parts.append(f"response.text={text_str}")
+                _add("response.text", text)
+            else:
+                # Some httpx responses expose `.content` (bytes) but no .text yet
+                content = getattr(resp, "content", None)
+                if content:
+                    try:
+                        _add("response.text", content.decode("utf-8", errors="replace"))
+                    except Exception:
+                        pass
         cur = cur.__cause__ or cur.__context__
     return "; ".join(parts) if parts else ""
 
