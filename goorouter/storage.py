@@ -1,11 +1,39 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
 
 SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class LogRow:
+    request_id: str
+    model_field: str
+    prefixes_raw: str | None
+    pinned_backend: str | None
+    urgency_used: str
+    classifier_used: str | None
+    classifier_fallback_reason: str | None
+    classifier_input_chars: int | None
+    classifier_input_truncated_from: int | None
+    classifier_latency_ms: int | None
+    classifier_domain: str | None
+    classifier_complexity: str | None
+    classifier_reason: str | None
+    backend_chosen: str
+    backend_latency_ms: int | None
+    tokens_in: int | None
+    tokens_out: int | None
+    success: bool
+    error_kind: str | None
+    prompt_content: str | None
+    prompt_storage_mode: str  # "full" | "hashed" | "none"
 
 
 def _load_migration(name: str) -> str:
@@ -31,3 +59,46 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if current < 1:
         conn.executescript(_load_migration("0001_init.sql"))
         conn.execute("PRAGMA user_version = 1")
+
+
+def _apply_storage_mode(content: str | None, mode: str) -> str | None:
+    if mode == "full":
+        return content
+    if mode == "hashed":
+        return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+    if mode == "none":
+        return None
+    raise ValueError(f"unknown prompt_storage_mode: {mode}")
+
+
+def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
+    """Insert a request log row. Returns the new id."""
+    stored = _apply_storage_mode(row.prompt_content, row.prompt_storage_mode)
+    cursor = conn.execute(
+        """
+        INSERT INTO requests (
+            ts, request_id, model_field, prefixes_raw, pinned_backend, urgency_used,
+            classifier_used, classifier_fallback_reason, classifier_input_chars,
+            classifier_input_truncated_from, classifier_latency_ms, classifier_domain,
+            classifier_complexity, classifier_reason, backend_chosen, backend_latency_ms,
+            tokens_in, tokens_out, success, error_kind, prompt_content, prompt_storage_mode
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            row.request_id, row.model_field, row.prefixes_raw, row.pinned_backend,
+            row.urgency_used, row.classifier_used, row.classifier_fallback_reason,
+            row.classifier_input_chars, row.classifier_input_truncated_from,
+            row.classifier_latency_ms, row.classifier_domain, row.classifier_complexity,
+            row.classifier_reason, row.backend_chosen, row.backend_latency_ms,
+            row.tokens_in, row.tokens_out, 1 if row.success else 0, row.error_kind,
+            stored, row.prompt_storage_mode,
+        ),
+    )
+    return int(cursor.lastrowid or 0)

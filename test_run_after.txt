@@ -1,0 +1,42 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.0, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\rickm\AppData\Local\Programs\Python\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\rickm\repos\goorouter
+configfile: pyproject.toml
+plugins: anyio-4.13.0, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 12 items
+
+tests/test_config.py::test_config_dataclass_construction PASSED          [  8%]
+tests/test_config.py::test_load_config_basic PASSED                      [ 16%]
+tests/test_config.py::test_load_config_tilde_expansion PASSED            [ 25%]
+tests/test_config.py::test_validate_missing_classifier_backend PASSED    [ 33%]
+tests/test_config.py::test_validate_missing_policy_cell FAILED           [ 41%]
+tests/test_config.py::test_validate_undefined_backend_in_policy PASSED   [ 50%]
+tests/test_config.py::test_validate_default_on_failure_undefined PASSED  [ 58%]
+tests/test_config.py::test_validate_collects_all_errors PASSED           [ 66%]
+tests/test_config.py::test_validate_invalid_default_urgency PASSED       [ 75%]
+tests/test_config.py::test_validate_invalid_prompt_storage PASSED        [ 83%]
+tests/test_config.py::test_load_config_missing_file PASSED               [ 91%]
+tests/test_config.py::test_load_config_malformed_toml PASSED             [100%]
+
+================================== FAILURES ===================================
+______________________ test_validate_missing_policy_cell ______________________
+
+tmp_path = WindowsPath('C:/Users/rickm/AppData/Local/Temp/pytest-of-rickm/pytest-11/test_validate_missing_policy_c0')
+
+    def test_validate_missing_policy_cell(tmp_path):
+        # Drop one cell from policy.normal: change "general,hard" line into a different urgency block opening
+        toml = EXAMPLE_TOML.replace(
+            '"general,hard" = "cloud-large"\n\n[routing.policy.urgent]',
+            "[routing.policy.urgent]",
+            1,
+        )
+        p = tmp_path / "c.toml"; p.write_text(toml)
+>       with pytest.raises(ValueError) as e:
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests\test_config.py:146: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_config.py::test_validate_missing_policy_cell - Failed: DID ...
+======================== 1 failed, 11 passed in 0.19s =========================
