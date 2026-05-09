@@ -60,3 +60,26 @@ def test_empty_string():
     out = parse_prefixes("", URGENCIES, BACKENDS)
     assert out.urgency is None
     assert out.stripped == ""
+
+
+def test_lone_bang_with_space_is_not_a_prefix():
+    out = parse_prefixes("! hello", URGENCIES, BACKENDS)
+    assert out.urgency is None
+    assert out.pinned_backend is None
+    assert out.stripped == "! hello"
+    assert out.raw == ""
+
+
+def test_lone_bang_alone():
+    out = parse_prefixes("!", URGENCIES, BACKENDS)
+    assert out.urgency is None
+    assert out.pinned_backend is None
+    assert out.stripped == "!"
+    assert out.raw == ""
+
+
+def test_bang_inside_message_after_prefix_not_reparsed():
+    out = parse_prefixes("!urgent run !opus thing", URGENCIES, BACKENDS)
+    assert out.urgency == "urgent"
+    assert out.pinned_backend is None
+    assert out.stripped == "run !opus thing"

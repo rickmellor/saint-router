@@ -57,6 +57,8 @@ def parse_prefixes(
         while i < len(rest) and not rest[i].isspace():
             i += 1
         token = rest[1:i]
+        if not token:
+            break  # bare '!' is not a prefix; leave the message intact
         raw_tokens.append("!" + token)
         if token in urgencies:
             urgency = token
