@@ -1,4 +1,68 @@
-from goorouter.config import BackendConfig, Config, ClassifierConfig, RoutingConfig, ServerConfig, LoggingConfig
+import os
+from pathlib import Path
+
+import pytest
+
+from goorouter.config import BackendConfig, Config, ClassifierConfig, RoutingConfig, ServerConfig, LoggingConfig, load_config
+
+
+EXAMPLE_TOML = """
+[server]
+host = "127.0.0.1"
+port = 4000
+
+[backends.cloud-large]
+provider = "anthropic"
+model = "claude-opus-4-7"
+api_key_env = "ANTHROPIC_API_KEY"
+aliases = ["opus"]
+timeout_s = 120
+
+[backends.local-small]
+provider = "openai"
+base_url = "http://localhost:1234/v1"
+model = "qwen2.5-3b-instruct"
+api_key = "lm-studio"
+aliases = []
+timeout_s = 60
+
+[classifier]
+backend = "local-small"
+max_input_chars = 8000
+timeout_s = 5
+
+[routing]
+default_urgency = "normal"
+default_on_failure = "cloud-large"
+
+[routing.policy.normal]
+"code,trivial"    = "local-small"
+"code,medium"     = "local-small"
+"code,hard"       = "cloud-large"
+"general,trivial" = "local-small"
+"general,medium"  = "local-small"
+"general,hard"    = "cloud-large"
+
+[routing.policy.urgent]
+"code,trivial"    = "local-small"
+"code,medium"     = "cloud-large"
+"code,hard"       = "cloud-large"
+"general,trivial" = "cloud-large"
+"general,medium"  = "cloud-large"
+"general,hard"    = "cloud-large"
+
+[routing.policy.patient]
+"code,trivial"    = "local-small"
+"code,medium"     = "local-small"
+"code,hard"       = "local-small"
+"general,trivial" = "local-small"
+"general,medium"  = "local-small"
+"general,hard"    = "local-small"
+
+[logging]
+db_path = "${TEST_HOME}/log.sqlite"
+prompt_storage = "full"
+"""
 
 
 def test_config_dataclass_construction():
@@ -39,3 +103,25 @@ def test_config_dataclass_construction():
     )
     assert cfg.backends["cloud-large"].aliases == ("opus", "claude")
     assert cfg.routing.default_on_failure == "cloud-large"
+
+
+def test_load_config_basic(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(EXAMPLE_TOML)
+    cfg = load_config(cfg_path)
+    assert cfg.server.port == 4000
+    assert "cloud-large" in cfg.backends
+    assert cfg.backends["cloud-large"].aliases == ("opus",)
+    assert cfg.logging.db_path == str(tmp_path / "log.sqlite")
+
+
+def test_load_config_tilde_expansion(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    toml = EXAMPLE_TOML.replace('db_path = "${TEST_HOME}/log.sqlite"', 'db_path = "~/log.sqlite"')
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(toml)
+    cfg = load_config(cfg_path)
+    assert cfg.logging.db_path == str(Path(tmp_path) / "log.sqlite")
