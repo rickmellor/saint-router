@@ -1,0 +1,95 @@
+# goorouter configuration. Copy to ~/.goorouter/config.toml and edit.
+
+[server]
+host = "127.0.0.1"
+port = 4000
+
+# ---- Backends ----------------------------------------------------------
+# Names are arbitrary identifiers. `aliases` give short names you can use
+# as !-prefixes (e.g. "!opus") in the latest user message.
+# API keys: prefer `api_key_env` (read from the named environment variable);
+# `api_key` is allowed but warned for non-LM-Studio providers.
+
+[backends.cloud-large]
+provider     = "anthropic"
+model        = "claude-opus-4-7"
+api_key_env  = "ANTHROPIC_API_KEY"
+aliases      = ["opus", "claude"]
+timeout_s    = 120
+
+[backends.cloud-small]
+provider     = "anthropic"
+model        = "claude-haiku-4-5-20251001"
+api_key_env  = "ANTHROPIC_API_KEY"
+aliases      = ["haiku"]
+timeout_s    = 60
+
+[backends.local-large]
+provider     = "openai"
+base_url     = "http://localhost:1234/v1"
+model        = "qwen2.5-32b-instruct"
+api_key      = "lm-studio"
+aliases      = ["qwen32"]
+timeout_s    = 180
+
+[backends.local-small]
+provider     = "openai"
+base_url     = "http://localhost:1234/v1"
+model        = "qwen2.5-3b-instruct"
+api_key      = "lm-studio"
+aliases      = ["qwen3"]
+timeout_s    = 60
+
+[backends.local-coder]
+provider     = "openai"
+base_url     = "http://localhost:1234/v1"
+model        = "qwen2.5-coder-32b-instruct"
+api_key      = "lm-studio"
+aliases      = ["qwen-coder", "coder"]
+timeout_s    = 180
+
+# ---- Classifier --------------------------------------------------------
+[classifier]
+backend          = "local-small"      # which backend runs the classifier
+fallback_backend = "local-large"      # used for oversize input or primary failure (optional)
+max_input_chars  = 8000               # primary's input cap (head-truncate if no fallback)
+timeout_s        = 5
+# prompt_template_path = "~/.goorouter/classifier.prompt"   # optional override
+
+# ---- Routing -----------------------------------------------------------
+[routing]
+default_urgency    = "normal"
+default_on_failure = "cloud-large"    # last-resort backend if classifier and fallback both fail.
+                                      # Set to a local backend if running offline-only.
+
+[routing.policy.normal]
+"code,trivial"    = "local-coder"
+"code,medium"     = "local-coder"
+"code,hard"       = "cloud-large"
+"general,trivial" = "local-small"
+"general,medium"  = "local-large"
+"general,hard"    = "cloud-large"
+
+[routing.policy.urgent]
+"code,trivial"    = "local-coder"
+"code,medium"     = "cloud-small"
+"code,hard"       = "cloud-large"
+"general,trivial" = "cloud-small"
+"general,medium"  = "cloud-small"
+"general,hard"    = "cloud-large"
+
+[routing.policy.patient]
+"code,trivial"    = "local-coder"
+"code,medium"     = "local-coder"
+"code,hard"       = "local-large"
+"general,trivial" = "local-small"
+"general,medium"  = "local-small"
+"general,hard"    = "local-large"
+
+# ---- Logging -----------------------------------------------------------
+[logging]
+db_path        = "~/.goorouter/log.sqlite"
+prompt_storage = "full"   # "full" | "hashed" | "none"
+                          # full:   readable later; useful for relabeling and future training
+                          # hashed: SHA-256 only; deduplication possible without retaining content
+                          # none:   metadata only (latency, tokens, decisions)
