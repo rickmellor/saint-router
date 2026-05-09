@@ -125,3 +125,90 @@ def test_load_config_tilde_expansion(tmp_path, monkeypatch):
     cfg_path.write_text(toml)
     cfg = load_config(cfg_path)
     assert Path(cfg.logging.db_path) == Path(tmp_path) / "log.sqlite"
+
+
+def test_validate_missing_classifier_backend(tmp_path):
+    toml = EXAMPLE_TOML.replace('backend = "local-small"', 'backend = "phantom"')
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "phantom" in str(e.value)
+
+
+def test_validate_missing_policy_cell(tmp_path):
+    # Drop one cell from policy.normal: change "general,hard" line into a different urgency block opening
+    toml = EXAMPLE_TOML.replace(
+        '"general,hard"    = "cloud-large"\n\n[routing.policy.urgent]',
+        "[routing.policy.urgent]",
+        1,
+    )
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "general,hard" in str(e.value)
+
+
+def test_validate_undefined_backend_in_policy(tmp_path):
+    toml = EXAMPLE_TOML.replace(
+        '"code,hard"       = "cloud-large"',
+        '"code,hard"       = "phantom"',
+        1,
+    )
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "phantom" in str(e.value)
+
+
+def test_validate_default_on_failure_undefined(tmp_path):
+    toml = EXAMPLE_TOML.replace(
+        'default_on_failure = "cloud-large"',
+        'default_on_failure = "phantom"',
+    )
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "phantom" in str(e.value)
+
+
+def test_validate_collects_all_errors(tmp_path):
+    toml = EXAMPLE_TOML.replace('backend = "local-small"', 'backend = "phantom1"')
+    toml = toml.replace('default_on_failure = "cloud-large"', 'default_on_failure = "phantom2"')
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    msg = str(e.value)
+    assert "phantom1" in msg and "phantom2" in msg
+
+
+def test_validate_invalid_default_urgency(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    toml = EXAMPLE_TOML.replace('default_urgency = "normal"', 'default_urgency = "wat"')
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "default_urgency" in str(e.value) and "wat" in str(e.value)
+
+
+def test_validate_invalid_prompt_storage(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    toml = EXAMPLE_TOML.replace('prompt_storage = "full"', 'prompt_storage = "loud"')
+    p = tmp_path / "c.toml"; p.write_text(toml)
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "prompt_storage" in str(e.value) and "loud" in str(e.value)
+
+
+def test_load_config_missing_file(tmp_path):
+    missing = tmp_path / "does-not-exist.toml"
+    with pytest.raises(ValueError) as e:
+        load_config(missing)
+    assert "does-not-exist.toml" in str(e.value) or str(missing) in str(e.value)
+
+
+def test_load_config_malformed_toml(tmp_path):
+    p = tmp_path / "broken.toml"
+    p.write_text("this is = = not = valid = toml [[[")
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    assert "broken.toml" in str(e.value) or str(p) in str(e.value)

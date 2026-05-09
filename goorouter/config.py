@@ -63,9 +63,81 @@ def _expand(value: str) -> str:
     return os.path.expandvars(os.path.expanduser(value))
 
 
+DOMAINS = ("code", "general")
+COMPLEXITIES = ("trivial", "medium", "hard")
+URGENCIES = ("normal", "urgent", "patient")
+PROMPT_STORAGE_MODES = ("full", "hashed", "none")
+ALL_CELLS = tuple(f"{d},{c}" for d in DOMAINS for c in COMPLEXITIES)
+
+
+def _validate(cfg: Config) -> list[str]:
+    errors: list[str] = []
+    backend_names = set(cfg.backends.keys())
+
+    if cfg.classifier.backend not in backend_names:
+        errors.append(
+            f"classifier.backend '{cfg.classifier.backend}' is not defined in [backends]"
+        )
+    if cfg.classifier.fallback_backend and cfg.classifier.fallback_backend not in backend_names:
+        errors.append(
+            f"classifier.fallback_backend '{cfg.classifier.fallback_backend}' is not defined in [backends]"
+        )
+    if cfg.routing.default_on_failure not in backend_names:
+        errors.append(
+            f"routing.default_on_failure '{cfg.routing.default_on_failure}' is not defined in [backends]"
+        )
+
+    if cfg.routing.default_urgency not in URGENCIES:
+        errors.append(
+            f"routing.default_urgency '{cfg.routing.default_urgency}' must be one of {list(URGENCIES)}"
+        )
+
+    if cfg.logging.prompt_storage not in PROMPT_STORAGE_MODES:
+        errors.append(
+            f"logging.prompt_storage '{cfg.logging.prompt_storage}' must be one of {list(PROMPT_STORAGE_MODES)}"
+        )
+
+    for urgency in URGENCIES:
+        cells = cfg.routing.policy.get(urgency)
+        if cells is None:
+            errors.append(f"routing.policy.{urgency} is missing entirely")
+            continue
+        for cell in ALL_CELLS:
+            if cell not in cells:
+                errors.append(f"routing.policy.{urgency} missing cell '{cell}'")
+            else:
+                target = cells[cell]
+                if target not in backend_names:
+                    errors.append(
+                        f"routing.policy.{urgency}['{cell}'] = '{target}' is not defined in [backends]"
+                    )
+
+    # Alias collision check: backend names + aliases must be unique, and may not collide with urgency tokens
+    seen_aliases: dict[str, str] = {}
+    for name, b in cfg.backends.items():
+        for alias in (name, *b.aliases):
+            if alias in URGENCIES:
+                errors.append(
+                    f"backend '{name}' alias '{alias}' collides with reserved urgency token"
+                )
+            existing = seen_aliases.get(alias)
+            if existing and existing != name:
+                errors.append(
+                    f"alias '{alias}' is used by both backends '{existing}' and '{name}'"
+                )
+            seen_aliases[alias] = name
+
+    return errors
+
+
 def _load_toml(path: Path) -> dict:
-    with path.open("rb") as f:
-        return tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError as e:
+        raise ValueError(f"Config file not found: {path}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"Failed to parse TOML at {path}: {e}") from e
 
 
 def load_config(path: Path) -> Config:
@@ -118,10 +190,14 @@ def load_config(path: Path) -> Config:
         prompt_storage=log_raw.get("prompt_storage", "full"),
     )
 
-    return Config(
+    cfg = Config(
         server=server,
         backends=backends,
         classifier=classifier,
         routing=routing,
         logging=logging_cfg,
     )
+    errors = _validate(cfg)
+    if errors:
+        raise ValueError("Config errors:\n  - " + "\n  - ".join(errors))
+    return cfg
