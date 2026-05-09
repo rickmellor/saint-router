@@ -102,3 +102,50 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
         ),
     )
     return int(cursor.lastrowid or 0)
+
+
+class RelabelError(ValueError):
+    pass
+
+
+def _row_to_dict(cursor: sqlite3.Cursor, row: tuple) -> dict:
+    return {col[0]: row[i] for i, col in enumerate(cursor.description)}
+
+
+def get_recent(conn: sqlite3.Connection, limit: int = 20, backend: str | None = None) -> list[dict]:
+    if backend is None:
+        cursor = conn.execute("SELECT * FROM requests ORDER BY id DESC LIMIT ?", (limit,))
+    else:
+        cursor = conn.execute(
+            "SELECT * FROM requests WHERE backend_chosen = ? ORDER BY id DESC LIMIT ?",
+            (backend, limit),
+        )
+    return [_row_to_dict(cursor, r) for r in cursor.fetchall()]
+
+
+def get_by_id(conn: sqlite3.Connection, row_id: int) -> dict | None:
+    cursor = conn.execute("SELECT * FROM requests WHERE id = ?", (row_id,))
+    r = cursor.fetchone()
+    return _row_to_dict(cursor, r) if r else None
+
+
+def _set_relabel(conn: sqlite3.Connection, row_id: int, backend: str, note: str | None) -> None:
+    conn.execute(
+        "UPDATE requests SET relabel_backend = ?, relabel_ts = ?, relabel_note = ? WHERE id = ?",
+        (backend, datetime.now(timezone.utc).isoformat(), note, row_id),
+    )
+
+
+def relabel_last(conn: sqlite3.Connection, backend: str, note: str | None) -> int:
+    cursor = conn.execute("SELECT MAX(id) FROM requests")
+    last_id = cursor.fetchone()[0]
+    if last_id is None:
+        raise RelabelError("no rows in requests table to relabel")
+    _set_relabel(conn, last_id, backend, note)
+    return int(last_id)
+
+
+def relabel_by_id(conn: sqlite3.Connection, row_id: int, backend: str, note: str | None) -> None:
+    if get_by_id(conn, row_id) is None:
+        raise RelabelError(f"no row with id {row_id}")
+    _set_relabel(conn, row_id, backend, note)

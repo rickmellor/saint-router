@@ -79,3 +79,55 @@ def test_log_request_none_storage(tmp_path):
     log_request(conn, _row(prompt_storage_mode="none"))
     r = conn.execute("SELECT prompt_content, prompt_storage_mode FROM requests").fetchone()
     assert r == (None, "none")
+
+
+from goorouter.storage import get_recent, get_by_id, relabel_last, relabel_by_id, RelabelError
+
+
+def test_get_recent_orders_by_ts_desc(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(request_id="r-1"))
+    log_request(conn, _row(request_id="r-2"))
+    log_request(conn, _row(request_id="r-3"))
+    rows = get_recent(conn, limit=2)
+    ids = [r["request_id"] for r in rows]
+    assert ids == ["r-3", "r-2"]
+
+
+def test_get_recent_filtered_by_backend(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(backend_chosen="local-coder"))
+    log_request(conn, _row(backend_chosen="cloud-large"))
+    rows = get_recent(conn, limit=10, backend="local-coder")
+    assert len(rows) == 1
+
+
+def test_get_by_id(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    rid = log_request(conn, _row())
+    row = get_by_id(conn, rid)
+    assert row is not None
+    assert row["id"] == rid
+
+
+def test_relabel_last(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(request_id="a"))
+    log_request(conn, _row(request_id="b"))
+    relabel_last(conn, "cloud-large", note="should have been bigger")
+    r = conn.execute("SELECT request_id, relabel_backend, relabel_note FROM requests ORDER BY id DESC").fetchone()
+    assert r == ("b", "cloud-large", "should have been bigger")
+
+
+def test_relabel_by_id(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    rid = log_request(conn, _row())
+    relabel_by_id(conn, rid, "local-coder", note=None)
+    r = get_by_id(conn, rid)
+    assert r is not None and r["relabel_backend"] == "local-coder"
+
+
+def test_relabel_no_rows_raises(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    with pytest.raises(RelabelError):
+        relabel_last(conn, "cloud-large", note=None)
