@@ -108,3 +108,23 @@ def test_chat_completions_streaming(tmp_path):
     assert "data: " in text
     assert "Hel" in text
     assert "data: [DONE]" in text
+
+
+def test_stdout_summary_line(tmp_path, capsys):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    backend_response = {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    with patch("goorouter.backends.litellm.acompletion",
+               AsyncMock(return_value=backend_response)):
+        client.post("/v1/chat/completions", json={
+            "model": "goo-cloud-large",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+    captured = capsys.readouterr()
+    assert "[router]" in captured.out
+    assert "cloud-large" in captured.out
