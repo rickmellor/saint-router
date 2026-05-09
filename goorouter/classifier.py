@@ -13,16 +13,56 @@ from goorouter.backends import call_backend
 from goorouter.config import BackendConfig
 
 
+def _extract_litellm_detail(err: BaseException) -> str:
+    """Walk an exception chain looking for LiteLLM/httpx attributes worth showing.
+
+    LiteLLM wraps provider responses in BadRequestError / APIError with
+    attributes like `.status_code`, `.message`, `.response`, `.body` —
+    most of which `str(err)` doesn't print. Pull whatever's there so the
+    user sees the actual HTTP response that confused us.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = err
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = getattr(cur, "status_code", None)
+        if status is not None:
+            parts.append(f"status={status}")
+        # LiteLLM often stashes the upstream response body in .body or .message
+        body = getattr(cur, "body", None) or getattr(cur, "response_text", None)
+        if body:
+            body_str = str(body)
+            if len(body_str) > 500:
+                body_str = body_str[:500] + "...(truncated)"
+            parts.append(f"body={body_str}")
+        # The httpx Response, if attached
+        resp = getattr(cur, "response", None)
+        if resp is not None:
+            text = getattr(resp, "text", None)
+            if text:
+                text_str = str(text)
+                if len(text_str) > 500:
+                    text_str = text_str[:500] + "...(truncated)"
+                parts.append(f"response.text={text_str}")
+        cur = cur.__cause__ or cur.__context__
+    return "; ".join(parts) if parts else ""
+
+
 def _log_classifier_failure(backend_name: str, err: Exception) -> None:
     """Print the actual classifier error to stderr so users can diagnose.
 
     `classify_with_fallback` swallows ClassifierError to drive the fallback
     chain; without this, real errors (LM Studio not running, model name
     mismatch, network refused, etc.) become invisible behind the generic
-    "(both failed)" stdout marker. We log full detail to stderr instead.
+    "(both failed)" stdout marker. We log full detail to stderr instead,
+    including any HTTP status / response body the underlying SDK exposes.
     """
+    detail = _extract_litellm_detail(err)
+    suffix = f" [{detail}]" if detail else ""
     print(
-        f"[router] classifier '{backend_name}' failed: {type(err).__name__}: {err}",
+        f"[router] classifier '{backend_name}' failed: "
+        f"{type(err).__name__}: {err}{suffix}",
         file=sys.stderr, flush=True,
     )
 
