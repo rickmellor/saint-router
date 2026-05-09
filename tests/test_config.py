@@ -212,3 +212,14 @@ def test_load_config_malformed_toml(tmp_path):
     with pytest.raises(ValueError) as e:
         load_config(p)
     assert "broken.toml" in str(e.value) or str(p) in str(e.value)
+
+
+def test_resolve_backend_by_name_or_alias(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    p = tmp_path / "c.toml"; p.write_text(EXAMPLE_TOML)
+    cfg = load_config(p)
+    from goorouter.config import resolve_backend
+
+    assert resolve_backend(cfg, "cloud-large").name == "cloud-large"
+    assert resolve_backend(cfg, "opus").name == "cloud-large"
+    assert resolve_backend(cfg, "nope") is None

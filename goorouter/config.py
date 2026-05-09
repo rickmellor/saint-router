@@ -201,3 +201,12 @@ def load_config(path: Path) -> Config:
     if errors:
         raise ValueError("Config errors:\n  - " + "\n  - ".join(errors))
     return cfg
+
+
+def resolve_backend(cfg: Config, token: str) -> BackendConfig | None:
+    if token in cfg.backends:
+        return cfg.backends[token]
+    for b in cfg.backends.values():
+        if token in b.aliases:
+            return b
+    return None
