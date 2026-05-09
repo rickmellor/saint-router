@@ -124,4 +124,4 @@ def test_load_config_tilde_expansion(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(toml)
     cfg = load_config(cfg_path)
-    assert cfg.logging.db_path == str(Path(tmp_path) / "log.sqlite")
+    assert Path(cfg.logging.db_path) == Path(tmp_path) / "log.sqlite"

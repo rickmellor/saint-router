@@ -60,8 +60,7 @@ class Config:
 
 
 def _expand(value: str) -> str:
-    expanded = os.path.expandvars(os.path.expanduser(value))
-    return str(Path(expanded))
+    return os.path.expandvars(os.path.expanduser(value))
 
 
 def _load_toml(path: Path) -> dict:
