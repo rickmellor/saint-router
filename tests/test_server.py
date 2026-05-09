@@ -68,3 +68,43 @@ def test_chat_completions_unknown_prefix_returns_400(tmp_path):
     })
     assert resp.status_code == 400
     assert "doesnotexist" in resp.json()["error"]["message"]
+
+
+class _FakeStreamChunks:
+    """Async iterator yielding fake litellm chunks."""
+
+    def __init__(self, chunks: list[dict]):
+        self._chunks = list(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+
+def test_chat_completions_streaming(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    chunks = [
+        {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "m",
+         "choices": [{"index": 0, "delta": {"content": "Hel"}, "finish_reason": None}]},
+        {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "m",
+         "choices": [{"index": 0, "delta": {"content": "lo"}, "finish_reason": None}]},
+        {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "m",
+         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    with patch("goorouter.backends.litellm.acompletion",
+               AsyncMock(return_value=_FakeStreamChunks(chunks))):
+        with client.stream("POST", "/v1/chat/completions", json={
+            "model": "goo-cloud-large",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }) as resp:
+            text = "".join(part for part in resp.iter_text())
+    assert "data: " in text
+    assert "Hel" in text
+    assert "data: [DONE]" in text
