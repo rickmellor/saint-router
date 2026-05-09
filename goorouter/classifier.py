@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 from importlib import resources
@@ -10,6 +11,20 @@ from typing import Any
 
 from goorouter.backends import call_backend
 from goorouter.config import BackendConfig
+
+
+def _log_classifier_failure(backend_name: str, err: Exception) -> None:
+    """Print the actual classifier error to stderr so users can diagnose.
+
+    `classify_with_fallback` swallows ClassifierError to drive the fallback
+    chain; without this, real errors (LM Studio not running, model name
+    mismatch, network refused, etc.) become invisible behind the generic
+    "(both failed)" stdout marker. We log full detail to stderr instead.
+    """
+    print(
+        f"[router] classifier '{backend_name}' failed: {type(err).__name__}: {err}",
+        file=sys.stderr, flush=True,
+    )
 
 VALID_DOMAINS = {"code", "general"}
 VALID_COMPLEXITIES = {"trivial", "medium", "hard"}
@@ -110,7 +125,8 @@ async def classify_with_fallback(
                 fallback_reason="oversize", input_chars=original_len,
                 input_truncated_from=None,
             )
-        except ClassifierError:
+        except ClassifierError as e:
+            _log_classifier_failure(fallback.name, e)
             return FallbackOutcome(
                 result=None, classifier_used=None,
                 fallback_reason="oversize", input_chars=original_len,
@@ -127,7 +143,8 @@ async def classify_with_fallback(
                 fallback_reason=None, input_chars=max_input_chars,
                 input_truncated_from=original_len,
             )
-        except ClassifierError:
+        except ClassifierError as e:
+            _log_classifier_failure(primary.name, e)
             return FallbackOutcome(
                 result=None, classifier_used=None,
                 fallback_reason="primary_error", input_chars=max_input_chars,
@@ -142,7 +159,8 @@ async def classify_with_fallback(
             fallback_reason=None, input_chars=original_len,
             input_truncated_from=None,
         )
-    except ClassifierError:
+    except ClassifierError as primary_err:
+        _log_classifier_failure(primary.name, primary_err)
         if fallback is None:
             return FallbackOutcome(
                 result=None, classifier_used=None,
@@ -156,7 +174,8 @@ async def classify_with_fallback(
                 fallback_reason="primary_error", input_chars=original_len,
                 input_truncated_from=None,
             )
-        except ClassifierError:
+        except ClassifierError as fb_err:
+            _log_classifier_failure(fallback.name, fb_err)
             return FallbackOutcome(
                 result=None, classifier_used=None,
                 fallback_reason="primary_error", input_chars=original_len,
