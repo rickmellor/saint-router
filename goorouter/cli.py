@@ -3,13 +3,11 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from typing import Optional
 
 import typer
 import uvicorn
 
 from goorouter.config import load_config
-
 
 app = typer.Typer(no_args_is_help=True, help="goorouter — localhost OpenAI-compatible router")
 
@@ -27,14 +25,14 @@ def _load_or_die(config_path: Path | None):
         return load_config(path)
     except ValueError as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(2) from None
 
 
 @app.command()
 def serve(
-    host: Optional[str] = typer.Option(None, help="Override [server.host]"),
-    port: Optional[int] = typer.Option(None, help="Override [server.port]"),
-    config: Optional[Path] = typer.Option(None, help="Path to config.toml"),
+    host: str | None = typer.Option(None, help="Override [server.host]"),
+    port: int | None = typer.Option(None, help="Override [server.port]"),
+    config: Path | None = typer.Option(None, help="Path to config.toml"),
 ):
     """Start the proxy server."""
     cfg = _load_or_die(config)
@@ -43,7 +41,8 @@ def serve(
 
     if bind_host not in ("127.0.0.1", "localhost", "::1"):
         typer.secho(
-            f"WARNING: binding to {bind_host} (not loopback). Anyone on this network may reach the proxy.",
+            f"WARNING: binding to {bind_host} (not loopback). "
+            "Anyone on this network may reach the proxy.",
             fg=typer.colors.YELLOW, err=True,
         )
 
@@ -55,7 +54,7 @@ def serve(
             f"Port {bind_port} in use; is another `goorouter serve` running?",
             fg=typer.colors.RED, err=True,
         )
-        raise typer.Exit(3)
+        raise typer.Exit(3) from None
     finally:
         s.close()
 
@@ -66,8 +65,8 @@ def serve(
 
 @app.command()
 def explain(
-    prompt: str = typer.Argument(..., help="Prompt text to classify and route (no destination call made)"),
-    config: Optional[Path] = typer.Option(None, help="Path to config.toml"),
+    prompt: str = typer.Argument(..., help="Prompt text to classify and route (no backend call)"),
+    config: Path | None = typer.Option(None, help="Path to config.toml"),
 ):
     """Run the routing pipeline against PROMPT and print the decision."""
     import asyncio
@@ -94,7 +93,7 @@ app.add_typer(config_app, name="config")
 
 
 @policy_app.command("show")
-def policy_show(config: Optional[Path] = typer.Option(None, help="Path to config.toml")):
+def policy_show(config: Path | None = typer.Option(None, help="Path to config.toml")):
     """Print the resolved policy tables."""
     cfg = _load_or_die(config)
     for urgency in ("normal", "urgent", "patient"):
@@ -110,7 +109,7 @@ def policy_show(config: Optional[Path] = typer.Option(None, help="Path to config
 
 
 @config_app.command("show")
-def config_show(config: Optional[Path] = typer.Option(None, help="Path to config.toml")):
+def config_show(config: Path | None = typer.Option(None, help="Path to config.toml")):
     """Print the resolved configuration with API keys masked."""
     cfg = _load_or_die(config)
     print(f"[server]\nhost = {cfg.server.host}\nport = {cfg.server.port}\n")
@@ -157,8 +156,8 @@ app.add_typer(log_app, name="log")
 @log_app.command("show")
 def log_show(
     limit: int = typer.Option(20, "--limit", "-n"),
-    backend: Optional[str] = typer.Option(None, "--backend", "-b"),
-    config: Optional[Path] = typer.Option(None),
+    backend: str | None = typer.Option(None, "--backend", "-b"),
+    config: Path | None = typer.Option(None),
 ):
     """Show recent request log rows."""
     from goorouter.storage import get_recent, open_db
@@ -177,7 +176,7 @@ def log_show(
 @log_app.command("id")
 def log_id(
     row_id: int = typer.Argument(...),
-    config: Optional[Path] = typer.Option(None),
+    config: Path | None = typer.Option(None),
 ):
     """Show full detail for one log row."""
     from goorouter.storage import get_by_id, open_db
@@ -205,17 +204,18 @@ def _check_backend_defined(cfg, backend: str) -> None:
             f"Defined: {sorted(cfg.backends.keys())}",
             fg=typer.colors.RED, err=True,
         )
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @relabel_app.command("last")
 def relabel_last_cmd(
     backend: str = typer.Argument(..., help="The backend that should have been used"),
-    note: Optional[str] = typer.Option(None, "--note"),
-    config: Optional[Path] = typer.Option(None),
+    note: str | None = typer.Option(None, "--note"),
+    config: Path | None = typer.Option(None),
 ):
     """Mark the most recent request as 'should have been <backend>'."""
-    from goorouter.storage import open_db, relabel_last as _relabel_last
+    from goorouter.storage import open_db
+    from goorouter.storage import relabel_last as _relabel_last
 
     cfg = _load_or_die(config)
     _check_backend_defined(cfg, backend)
@@ -225,18 +225,19 @@ def relabel_last_cmd(
         print(f"Relabeled row #{rid} → {backend}")
     except Exception as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @relabel_app.command("by-id")
 def relabel_by_id_cmd(
     row_id: int = typer.Argument(..., metavar="ID"),
     backend: str = typer.Argument(...),
-    note: Optional[str] = typer.Option(None, "--note"),
-    config: Optional[Path] = typer.Option(None),
+    note: str | None = typer.Option(None, "--note"),
+    config: Path | None = typer.Option(None),
 ):
     """Mark a specific row id as 'should have been <backend>'."""
-    from goorouter.storage import open_db, relabel_by_id as _relabel_by_id
+    from goorouter.storage import open_db
+    from goorouter.storage import relabel_by_id as _relabel_by_id
 
     cfg = _load_or_die(config)
     _check_backend_defined(cfg, backend)
@@ -246,7 +247,7 @@ def relabel_by_id_cmd(
         print(f"Relabeled row #{row_id} → {backend}")
     except Exception as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 if __name__ == "__main__":

@@ -30,7 +30,11 @@ class ClassifierResult:
 def load_prompt_template(path: str | None) -> str:
     if path:
         return Path(path).read_text(encoding="utf-8")
-    return resources.files("goorouter").joinpath("classifier_prompt.txt").read_text(encoding="utf-8")
+    return (
+        resources.files("goorouter")
+        .joinpath("classifier_prompt.txt")
+        .read_text(encoding="utf-8")
+    )
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)

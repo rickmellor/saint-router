@@ -62,7 +62,7 @@ The router SHALL respect `[logging].prompt_storage` per request and SHALL record
 
 ### Requirement: Relabel CLI
 
-The `goorouter relabel` CLI SHALL update an existing row's `relabel_backend`, `relabel_ts`, and (optionally) `relabel_note` columns. `relabel last <backend>` SHALL target the row with the highest `id`. `relabel <id> <backend>` SHALL target the explicit id. The CLI SHALL refuse to set `relabel_backend` to a name not currently defined under `[backends.*]`.
+The `goorouter relabel` CLI SHALL update an existing row's `relabel_backend`, `relabel_ts`, and (optionally) `relabel_note` columns. `relabel last <backend>` SHALL target the row with the highest `id`. `relabel by-id <id> <backend>` SHALL target the explicit id. The CLI SHALL refuse to set `relabel_backend` to a name not currently defined under `[backends.*]`.
 
 #### Scenario: relabel last
 - GIVEN at least one row in the requests table
@@ -71,7 +71,7 @@ The `goorouter relabel` CLI SHALL update an existing row's `relabel_backend`, `r
 
 #### Scenario: relabel by id with note
 - GIVEN row id 42 exists
-- WHEN `goorouter relabel 42 local-coder --note "should have used coder"` is invoked
+- WHEN `goorouter relabel by-id 42 local-coder --note "should have used coder"` is invoked
 - THEN row 42's `relabel_backend = "local-coder"` and `relabel_note = "should have used coder"`
 
 #### Scenario: Refuse undefined backend

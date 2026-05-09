@@ -1,10 +1,16 @@
-import os
 from pathlib import Path
 
 import pytest
 
-from goorouter.config import BackendConfig, Config, ClassifierConfig, RoutingConfig, ServerConfig, LoggingConfig, load_config
-
+from goorouter.config import (
+    BackendConfig,
+    ClassifierConfig,
+    Config,
+    LoggingConfig,
+    RoutingConfig,
+    ServerConfig,
+    load_config,
+)
 
 EXAMPLE_TOML = """
 [server]

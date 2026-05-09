@@ -5,11 +5,9 @@ import pytest
 
 from goorouter.classifier import (
     ClassifierError,
-    ClassifierResult,
     classify,
     classify_with_fallback,
     load_prompt_template,
-    FallbackOutcome,
 )
 from goorouter.config import BackendConfig
 

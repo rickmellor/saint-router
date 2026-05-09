@@ -4,9 +4,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from goorouter.config import (
-    BackendConfig, Config, ServerConfig, ClassifierConfig, RoutingConfig, LoggingConfig
+    BackendConfig,
+    ClassifierConfig,
+    Config,
+    LoggingConfig,
+    RoutingConfig,
+    ServerConfig,
 )
-from goorouter.router import RoutingDecision, decide_route
+from goorouter.router import decide_route
 
 
 def _cfg() -> Config:

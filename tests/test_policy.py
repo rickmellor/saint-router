@@ -1,6 +1,5 @@
 from goorouter.policy import resolve_policy
 
-
 POLICY = {
     "normal": {
         "code,trivial": "local-coder",

@@ -3,10 +3,9 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
-
 
 SCHEMA_VERSION = 1
 
@@ -43,7 +42,8 @@ def _load_migration(name: str) -> str:
 def open_db(path: Path) -> sqlite3.Connection:
     """Open or create the SQLite database. Enables WAL, runs migrations to current version."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)  # autocommit; we manage txns explicitly
+    # autocommit (isolation_level=None); allow cross-thread access for FastAPI workers
+    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     _migrate(conn)
@@ -91,7 +91,7 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
         )
         """,
         (
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
             row.request_id, row.model_field, row.prefixes_raw, row.pinned_backend,
             row.urgency_used, row.classifier_used, row.classifier_fallback_reason,
             row.classifier_input_chars, row.classifier_input_truncated_from,
@@ -132,7 +132,7 @@ def get_by_id(conn: sqlite3.Connection, row_id: int) -> dict | None:
 def _set_relabel(conn: sqlite3.Connection, row_id: int, backend: str, note: str | None) -> None:
     conn.execute(
         "UPDATE requests SET relabel_backend = ?, relabel_ts = ?, relabel_note = ? WHERE id = ?",
-        (backend, datetime.now(timezone.utc).isoformat(), note, row_id),
+        (backend, datetime.now(UTC).isoformat(), note, row_id),
     )
 
 

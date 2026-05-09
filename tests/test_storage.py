@@ -1,5 +1,4 @@
 import hashlib
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -81,7 +80,7 @@ def test_log_request_none_storage(tmp_path):
     assert r == (None, "none")
 
 
-from goorouter.storage import get_recent, get_by_id, relabel_last, relabel_by_id, RelabelError
+from goorouter.storage import RelabelError, get_by_id, get_recent, relabel_by_id, relabel_last
 
 
 def test_get_recent_orders_by_ts_desc(tmp_path):
@@ -115,7 +114,9 @@ def test_relabel_last(tmp_path):
     log_request(conn, _row(request_id="a"))
     log_request(conn, _row(request_id="b"))
     relabel_last(conn, "cloud-large", note="should have been bigger")
-    r = conn.execute("SELECT request_id, relabel_backend, relabel_note FROM requests ORDER BY id DESC").fetchone()
+    r = conn.execute(
+        "SELECT request_id, relabel_backend, relabel_note FROM requests ORDER BY id DESC"
+    ).fetchone()
     assert r == ("b", "cloud-large", "should have been bigger")
 
 

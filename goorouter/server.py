@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -11,8 +12,25 @@ from fastapi.responses import JSONResponse
 from goorouter.config import Config
 from goorouter.explain import format_decision
 from goorouter.prefixes import UnknownPrefixError
-from goorouter.router import GOO_AUTO, GOO_EXPLAIN, decide_route, dispatch_non_streaming
+from goorouter.router import GOO_AUTO, decide_route, dispatch_non_streaming
 from goorouter.storage import LogRow, log_request, open_db
+
+# Chat-completion kwargs we forward to the destination backend, beyond
+# `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
+# Anything not in this list is silently dropped. Add to v1.x as needed.
+_FORWARDED_PARAMS = (
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "stop",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "response_format",
+    "seed",
+    "stream_options",
+    "user",
+)
 
 
 def _explain_response(decision_text: str, model_field: str) -> dict[str, Any]:
@@ -58,8 +76,19 @@ def _build_log_row(decision, model_field, backend_latency_ms, success, error_kin
     )
 
 
+def _safe_log(db, row: LogRow) -> None:
+    """Persist a log row. Failures here MUST NOT affect the response — log to stderr only."""
+    try:
+        log_request(db, row)
+    except Exception as e:
+        print(
+            f"[router] log write failed for req#{row.request_id[:8]}: "
+            f"{type(e).__name__}: {e}",
+            file=sys.stderr, flush=True,
+        )
+
+
 def _emit_summary(decision, model_field: str, gen_ms: int) -> None:
-    cls_used = decision.classifier_outcome.classifier_used if decision.classifier_outcome else None
     cls_part = (
         f"classified={decision.classifier_result.domain}/{decision.classifier_result.complexity}"
         if decision.classifier_result else (
@@ -75,6 +104,38 @@ def _emit_summary(decision, model_field: str, gen_ms: int) -> None:
         f"(cls {cls_lat}ms gen {gen_ms}ms)",
         flush=True,
     )
+
+
+def _emit_decision_warnings(decision) -> None:
+    """Emit any one-off stdout markers about routing oddities for this request.
+
+    Currently:
+    - multimodal content routed to default_on_failure
+    - classifier fallback fired (oversize / primary_error)
+    """
+    rid = decision.request_id[:8]
+    if decision.multimodal:
+        print(
+            f"[router] req#{rid}: multimodal content detected; "
+            f"routing to default_on_failure ({decision.backend})",
+            flush=True,
+        )
+    out = decision.classifier_outcome
+    if out is not None and out.fallback_reason is not None:
+        target = out.classifier_used or "(both failed)"
+        if out.fallback_reason == "oversize":
+            reason_detail = f"oversize: {out.input_chars} chars"
+        else:
+            reason_detail = out.fallback_reason
+        print(
+            f"[router] req#{rid}: classifier fallback ({reason_detail}) → {target}",
+            flush=True,
+        )
+
+
+def _extract_forwarded(body: dict[str, Any]) -> dict[str, Any]:
+    """Pull through known chat-completion kwargs (excluding handled-explicitly ones)."""
+    return {k: body[k] for k in _FORWARDED_PARAMS if k in body}
 
 
 def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
@@ -101,6 +162,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         stream = bool(body.get("stream", False))
         tools = body.get("tools")
         tool_choice = body.get("tool_choice")
+        extra = _extract_forwarded(body)
 
         try:
             decision = await decide_route(cfg=cfg, model_field=model_field, messages=messages)
@@ -109,6 +171,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 status_code=400,
                 content={"error": {"message": str(e), "type": "invalid_request_error"}},
             )
+
+        _emit_decision_warnings(decision)
 
         if decision.mode == "explain":
             text = format_decision(decision, cfg)
@@ -129,6 +193,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     upstream = await dispatch_streaming(
                         cfg, decision, messages,
                         tools=tools, tool_choice=tool_choice,
+                        extra_params=extra or None,
                     )
                     async for chunk in upstream:
                         if hasattr(chunk, "model_dump"):
@@ -138,8 +203,12 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         else:
                             chunk_dict = dict(chunk)
                         usage = chunk_dict.get("usage") or {}
-                        tokens_in_total = max(tokens_in_total, usage.get("prompt_tokens", 0) or 0)
-                        tokens_out_total = max(tokens_out_total, usage.get("completion_tokens", 0) or 0)
+                        tokens_in_total = max(
+                            tokens_in_total, usage.get("prompt_tokens", 0) or 0
+                        )
+                        tokens_out_total = max(
+                            tokens_out_total, usage.get("completion_tokens", 0) or 0
+                        )
                         import json as _json
                         yield f"data: {_json.dumps(chunk_dict)}\n\n"
                     yield "data: [DONE]\n\n"
@@ -148,17 +217,19 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     success_local = False
                     error_kind_local = type(e).__name__
                     import json as _json
-                    yield f"data: {_json.dumps({'error': {'type': error_kind_local, 'message': str(e)}})}\n\n"
+                    err_payload = {"error": {"type": error_kind_local, "message": str(e)}}
+                    yield f"data: {_json.dumps(err_payload)}\n\n"
                 finally:
-                    log_request(app.state.db, _build_log_row(
+                    elapsed_ms = int((time.monotonic() - started_local) * 1000)
+                    _safe_log(app.state.db, _build_log_row(
                         decision=decision, model_field=model_field,
-                        backend_latency_ms=int((time.monotonic() - started_local) * 1000),
+                        backend_latency_ms=elapsed_ms,
                         success=success_local, error_kind=error_kind_local,
                         tokens_in=tokens_in_total or None,
                         tokens_out=tokens_out_total or None,
                         prompt_storage_mode=cfg.logging.prompt_storage,
                     ))
-                    _emit_summary(decision, model_field, int((time.monotonic() - started_local) * 1000))
+                    _emit_summary(decision, model_field, elapsed_ms)
 
             return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -166,6 +237,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         try:
             response = await dispatch_non_streaming(
                 cfg, decision, messages, tools=tools, tool_choice=tool_choice,
+                extra_params=extra or None,
             )
             success, error_kind = True, None
         except Exception as e:
@@ -175,7 +247,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         backend_latency_ms = int((time.monotonic() - started) * 1000)
 
         usage = (response or {}).get("usage", {}) if isinstance(response, dict) else {}
-        log_request(app.state.db, _build_log_row(
+        _safe_log(app.state.db, _build_log_row(
             decision=decision, model_field=model_field,
             backend_latency_ms=backend_latency_ms,
             success=success, error_kind=error_kind,

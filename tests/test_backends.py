@@ -29,7 +29,7 @@ async def test_call_anthropic_backend_translates_model(cloud_backend, monkeypatc
     mock = AsyncMock(return_value={"choices": [{"message": {"content": "hi"}}]})
     with patch("goorouter.backends.litellm.acompletion", mock):
         await call_backend(cloud_backend, messages=[{"role": "user", "content": "hi"}], stream=False)
-    args, kwargs = mock.call_args
+    _, kwargs = mock.call_args
     # litellm anthropic models get the "anthropic/" prefix
     assert kwargs["model"] == "anthropic/claude-opus-4-7"
     assert kwargs["api_key"] == "test-key"
@@ -41,7 +41,7 @@ async def test_call_openai_compatible_with_base_url(local_backend):
     mock = AsyncMock(return_value={"choices": []})
     with patch("goorouter.backends.litellm.acompletion", mock):
         await call_backend(local_backend, messages=[{"role": "user", "content": "x"}], stream=False)
-    args, kwargs = mock.call_args
+    _, kwargs = mock.call_args
     # OpenAI-compatible: just the model name (no provider prefix)
     assert kwargs["model"] == "qwen2.5-3b-instruct"
     assert kwargs["api_base"] == "http://localhost:1234/v1"

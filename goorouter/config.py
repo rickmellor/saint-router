@@ -78,23 +78,27 @@ def _validate(cfg: Config) -> list[str]:
         errors.append(
             f"classifier.backend '{cfg.classifier.backend}' is not defined in [backends]"
         )
-    if cfg.classifier.fallback_backend and cfg.classifier.fallback_backend not in backend_names:
+    fb = cfg.classifier.fallback_backend
+    if fb and fb not in backend_names:
         errors.append(
-            f"classifier.fallback_backend '{cfg.classifier.fallback_backend}' is not defined in [backends]"
+            f"classifier.fallback_backend '{fb}' is not defined in [backends]"
         )
     if cfg.routing.default_on_failure not in backend_names:
         errors.append(
-            f"routing.default_on_failure '{cfg.routing.default_on_failure}' is not defined in [backends]"
+            f"routing.default_on_failure '{cfg.routing.default_on_failure}'"
+            " is not defined in [backends]"
         )
 
     if cfg.routing.default_urgency not in URGENCIES:
         errors.append(
-            f"routing.default_urgency '{cfg.routing.default_urgency}' must be one of {list(URGENCIES)}"
+            f"routing.default_urgency '{cfg.routing.default_urgency}'"
+            f" must be one of {list(URGENCIES)}"
         )
 
     if cfg.logging.prompt_storage not in PROMPT_STORAGE_MODES:
         errors.append(
-            f"logging.prompt_storage '{cfg.logging.prompt_storage}' must be one of {list(PROMPT_STORAGE_MODES)}"
+            f"logging.prompt_storage '{cfg.logging.prompt_storage}'"
+            f" must be one of {list(PROMPT_STORAGE_MODES)}"
         )
 
     for urgency in URGENCIES:
@@ -109,10 +113,11 @@ def _validate(cfg: Config) -> list[str]:
                 target = cells[cell]
                 if target not in backend_names:
                     errors.append(
-                        f"routing.policy.{urgency}['{cell}'] = '{target}' is not defined in [backends]"
+                        f"routing.policy.{urgency}['{cell}'] = '{target}'"
+                        " is not defined in [backends]"
                     )
 
-    # Alias collision check: backend names + aliases must be unique, and may not collide with urgency tokens
+    # Backend names + aliases must be unique; aliases must not collide with urgency tokens.
     seen_aliases: dict[str, str] = {}
     for name, b in cfg.backends.items():
         for alias in (name, *b.aliases):
