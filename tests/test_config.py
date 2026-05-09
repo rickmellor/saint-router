@@ -113,7 +113,7 @@ def test_load_config_basic(tmp_path, monkeypatch):
     assert cfg.server.port == 4000
     assert "cloud-large" in cfg.backends
     assert cfg.backends["cloud-large"].aliases == ("opus",)
-    assert cfg.logging.db_path == str(tmp_path / "log.sqlite")
+    assert Path(cfg.logging.db_path) == Path(tmp_path) / "log.sqlite"
 
 
 def test_load_config_tilde_expansion(tmp_path, monkeypatch):
