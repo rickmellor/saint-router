@@ -147,3 +147,25 @@ async def test_decide_empty_messages_defaults_general_trivial():
     # policy.normal["general,trivial"] = local-small
     assert decision.backend == "local-small"
     assert decision.classifier_result is None
+
+
+from goorouter.router import apply_stripping
+
+
+def test_apply_stripping_replaces_last_user_content():
+    messages = [
+        {"role": "system", "content": "you are helpful"},
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "!urgent please"},
+    ]
+    out = apply_stripping(messages, stripped_last_user="please")
+    assert out is not messages
+    assert out[-1]["content"] == "please"
+    assert out[-3]["content"] == "earlier"
+
+
+def test_apply_stripping_no_user_message_unchanged():
+    messages = [{"role": "system", "content": "x"}]
+    out = apply_stripping(messages, stripped_last_user=None)
+    assert out == messages
