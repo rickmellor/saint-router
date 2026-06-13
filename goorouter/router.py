@@ -11,7 +11,7 @@ from goorouter.classifier import (
     classify_with_fallback,
     load_prompt_template,
 )
-from goorouter.config import Config
+from goorouter.config import BackendConfig, Config
 from goorouter.policy import resolve_policy
 from goorouter.prefixes import ParsedPrefixes, parse_prefixes
 
@@ -167,9 +167,10 @@ async def dispatch_non_streaming(
     cfg: Config, decision: RoutingDecision, messages: list[dict[str, Any]],
     *, tools: list[dict] | None = None, tool_choice: Any = None,
     extra_params: dict[str, Any] | None = None,
+    effective_backend: BackendConfig | None = None,
 ) -> Any:
     out_messages = apply_stripping(messages, decision.stripped_last_user)
-    backend = cfg.backends[decision.backend]
+    backend = effective_backend or cfg.backends[decision.backend]
     return await call_backend(
         backend, messages=out_messages, stream=False,
         tools=tools, tool_choice=tool_choice,
@@ -181,9 +182,10 @@ async def dispatch_streaming(
     cfg: Config, decision: RoutingDecision, messages: list[dict[str, Any]],
     *, tools: list[dict] | None = None, tool_choice: Any = None,
     extra_params: dict[str, Any] | None = None,
+    effective_backend: BackendConfig | None = None,
 ) -> Any:
     out_messages = apply_stripping(messages, decision.stripped_last_user)
-    backend = cfg.backends[decision.backend]
+    backend = effective_backend or cfg.backends[decision.backend]
     return await call_backend(
         backend, messages=out_messages, stream=True,
         tools=tools, tool_choice=tool_choice,

@@ -9,8 +9,10 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from goorouter.binding import resolve_for_dispatch
 from goorouter.config import Config
 from goorouter.explain import format_decision
+from goorouter.johnny import build_resolver, provide_telemetry
 from goorouter.prefixes import UnknownPrefixError
 from goorouter.router import GOO_AUTO, decide_route, dispatch_non_streaming
 from goorouter.storage import LogRow, log_request, open_db
@@ -49,7 +51,8 @@ def _explain_response(decision_text: str, model_field: str) -> dict[str, Any]:
 
 
 def _build_log_row(decision, model_field, backend_latency_ms, success, error_kind,
-                    tokens_in, tokens_out, prompt_storage_mode):
+                    tokens_in, tokens_out, prompt_storage_mode,
+                    johnny_seat=None, state_at_dispatch=None):
     out = decision.classifier_outcome
     return LogRow(
         request_id=decision.request_id,
@@ -73,6 +76,8 @@ def _build_log_row(decision, model_field, backend_latency_ms, success, error_kin
         error_kind=error_kind,
         prompt_content=decision.last_user_content_original,
         prompt_storage_mode=prompt_storage_mode,
+        johnny_seat=johnny_seat,
+        state_at_dispatch=state_at_dispatch,
     )
 
 
@@ -142,6 +147,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
     app = FastAPI(title="goorouter", version="0.1.0")
     app.state.cfg = cfg
     app.state.db = open_db(db_path)
+    app.state.resolver = build_resolver(cfg.johnny)  # None unless any backend is johnny-bound
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
@@ -175,8 +181,21 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         _emit_decision_warnings(decision)
 
         if decision.mode == "explain":
-            text = format_decision(decision, cfg)
+            text = format_decision(decision, cfg, resolver=app.state.resolver)
             return _explain_response(text, model_field)
+
+        # johnny override overlay: resolve the chosen backend's live endpoint/liveness.
+        # (No-op for unbound backends; degrades to the static baseline if johnny is down.)
+        eff = resolve_for_dispatch(cfg, decision.backend, app.state.resolver)
+
+        def _provide(latency_ms, ttft_ms, tokens_in, tokens_out, success):
+            # Provide telemetry only when the johnny seat actually served the request.
+            if eff.state_at_dispatch == "johnny_ready" and eff.johnny_seat:
+                provide_telemetry({
+                    "seat": eff.johnny_seat, "ts": int(time.time()),
+                    "latency_ms": latency_ms, "ttft_ms": ttft_ms,
+                    "tokens_in": tokens_in, "tokens_out": tokens_out, "success": success,
+                })
 
         if stream:
             from fastapi.responses import StreamingResponse
@@ -185,6 +204,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
             async def gen():
                 started_local = time.monotonic()
+                first_chunk_ts: float | None = None
                 tokens_in_total = 0
                 tokens_out_total = 0
                 error_kind_local: str | None = None
@@ -194,8 +214,11 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         cfg, decision, messages,
                         tools=tools, tool_choice=tool_choice,
                         extra_params=extra or None,
+                        effective_backend=eff.backend,
                     )
                     async for chunk in upstream:
+                        if first_chunk_ts is None:
+                            first_chunk_ts = time.monotonic()  # TTFT
                         if hasattr(chunk, "model_dump"):
                             chunk_dict = chunk.model_dump()
                         elif isinstance(chunk, dict):
@@ -221,6 +244,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     yield f"data: {_json.dumps(err_payload)}\n\n"
                 finally:
                     elapsed_ms = int((time.monotonic() - started_local) * 1000)
+                    ttft_ms = int((first_chunk_ts - started_local) * 1000) if first_chunk_ts else None
                     _safe_log(app.state.db, _build_log_row(
                         decision=decision, model_field=model_field,
                         backend_latency_ms=elapsed_ms,
@@ -228,7 +252,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         tokens_in=tokens_in_total or None,
                         tokens_out=tokens_out_total or None,
                         prompt_storage_mode=cfg.logging.prompt_storage,
+                        johnny_seat=eff.johnny_seat, state_at_dispatch=eff.state_at_dispatch,
                     ))
+                    _provide(elapsed_ms, ttft_ms, tokens_in_total or None, tokens_out_total or None, success_local)
                     _emit_summary(decision, model_field, elapsed_ms)
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -237,7 +263,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         try:
             response = await dispatch_non_streaming(
                 cfg, decision, messages, tools=tools, tool_choice=tool_choice,
-                extra_params=extra or None,
+                extra_params=extra or None, effective_backend=eff.backend,
             )
             success, error_kind = True, None
         except Exception as e:
@@ -254,7 +280,10 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             tokens_in=usage.get("prompt_tokens"),
             tokens_out=usage.get("completion_tokens"),
             prompt_storage_mode=cfg.logging.prompt_storage,
+            johnny_seat=eff.johnny_seat, state_at_dispatch=eff.state_at_dispatch,
         ))
+        # non-streaming: TTFT not separable -> total latency only
+        _provide(backend_latency_ms, None, usage.get("prompt_tokens"), usage.get("completion_tokens"), success)
         _emit_summary(decision, model_field, backend_latency_ms)
 
         if not success:

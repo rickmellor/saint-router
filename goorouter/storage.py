@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,8 @@ class LogRow:
     error_kind: str | None
     prompt_content: str | None
     prompt_storage_mode: str  # "full" | "hashed" | "none"
+    johnny_seat: str | None = None  # resolved seat when the backend was johnny-bound
+    state_at_dispatch: str | None = None  # johnny_ready|static_baseline|while_loading|fallback|None
 
 
 def _load_migration(name: str) -> str:
@@ -59,6 +61,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if current < 1:
         conn.executescript(_load_migration("0001_init.sql"))
         conn.execute("PRAGMA user_version = 1")
+    if current < 2:
+        conn.executescript(_load_migration("0002_johnny.sql"))
+        conn.execute("PRAGMA user_version = 2")
 
 
 def _apply_storage_mode(content: str | None, mode: str) -> str | None:
@@ -81,13 +86,15 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             classifier_used, classifier_fallback_reason, classifier_input_chars,
             classifier_input_truncated_from, classifier_latency_ms, classifier_domain,
             classifier_complexity, classifier_reason, backend_chosen, backend_latency_ms,
-            tokens_in, tokens_out, success, error_kind, prompt_content, prompt_storage_mode
+            tokens_in, tokens_out, success, error_kind, prompt_content, prompt_storage_mode,
+            johnny_seat, state_at_dispatch
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?,
+            ?, ?
         )
         """,
         (
@@ -99,6 +106,7 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             row.classifier_reason, row.backend_chosen, row.backend_latency_ms,
             row.tokens_in, row.tokens_out, 1 if row.success else 0, row.error_kind,
             stored, row.prompt_storage_mode,
+            row.johnny_seat, row.state_at_dispatch,
         ),
     )
     return int(cursor.lastrowid or 0)

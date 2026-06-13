@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from goorouter.storage import LogRow, log_request, open_db, schema_version
+from goorouter.storage import SCHEMA_VERSION, LogRow, log_request, open_db, schema_version
 
 
 def test_open_db_creates_schema(tmp_path: Path):
@@ -11,7 +11,7 @@ def test_open_db_creates_schema(tmp_path: Path):
     conn = open_db(db)
     cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='requests'")
     assert cursor.fetchone() is not None
-    assert schema_version(conn) == 1
+    assert schema_version(conn) == SCHEMA_VERSION
 
 
 def test_open_db_enables_wal(tmp_path: Path):
@@ -26,7 +26,7 @@ def test_open_db_idempotent(tmp_path: Path):
     open_db(db).close()
     # Second open shouldn't error
     conn = open_db(db)
-    assert schema_version(conn) == 1
+    assert schema_version(conn) == SCHEMA_VERSION
 
 
 def _row(**overrides) -> LogRow:

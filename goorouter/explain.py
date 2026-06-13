@@ -4,7 +4,7 @@ from goorouter.config import Config
 from goorouter.router import RoutingDecision
 
 
-def format_decision(decision: RoutingDecision, cfg: Config) -> str:
+def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> str:
     lines: list[str] = []
     lines.append(f"Routing decision: {decision.backend}")
     backend = cfg.backends.get(decision.backend)
@@ -49,6 +49,23 @@ def format_decision(decision: RoutingDecision, cfg: Config) -> str:
             lines.append(
                 f"All classifiers failed; using default_on_failure → {decision.backend}"
             )
+
+    # johnny binding (liveness-aware; reflects reality, never triggers a load)
+    if resolver is not None:
+        from goorouter.binding import describe_for_explain
+
+        d = describe_for_explain(cfg, decision.backend, resolver)
+        if d:
+            lines.append("")
+            lines.append(f"johnny seat:        {d.get('seat') or '(none)'} [{d['state']}]")
+            if d.get("eta_s") is not None:
+                lines.append(f"  eta_s:            {d['eta_s']}")
+            if d["state"] == "ready":
+                lines.append(f"  override:         {d.get('endpoint')} / {d.get('model')}")
+                lines.append(f"  static baseline:  {d.get('static_baseline')}")
+                lines.append("  would serve via:  johnny override (johnny_ready)")
+            else:
+                lines.append(f"  would serve via:  {d['served_by']} ({d['state_at_dispatch']})")
 
     lines.append("")
     lines.append("(No tokens consumed at the destination backend.)")
