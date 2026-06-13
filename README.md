@@ -26,6 +26,23 @@ Configure your client (Zed / any OpenAI-compatible client) to use:
 3. **Classifier** sees the latest user message and returns `(domain ∈ code|general, complexity ∈ trivial|medium|hard)`.
 4. **Policy table** maps `(urgency, domain, complexity) → backend`. Three urgencies (`normal`, `urgent`, `patient`); set per-message via `!urgent` / `!patient` or globally via `default_urgency`.
 
+## johnny integration (optional)
+
+goorouter can route to **johnny-managed local seats** instead of static endpoints. Add a
+`johnny_role` (or `johnny_seat`) to a backend plus a `[johnny]` block; when johnny is
+reachable and the seat resolves `ready`, johnny's live endpoint + model **override** that
+backend's static `base_url`/`model`. Otherwise the backend falls back — `while_loading`
+(per-backend → `[routing]` global) → its own **static baseline** → `default_on_failure` —
+and **never blocks** on a (multi-minute) load. goorouter stays fully functional with johnny
+absent.
+
+- Integration is over johnny's **CLI** (`johnny resolve`/`up`) or its **HTTP daemon** —
+  never a library import, so goorouter keeps running standalone (and stays LiteLLM-isolated).
+- `goo-explain` is **liveness-aware**: it shows the resolved seat, its state/eta, and whether
+  the override or the static baseline would serve.
+- goorouter **provides** per-request latency / TTFT / tokens to johnny's telemetry ingest
+  spool (best-effort, non-fatal). See the `[johnny]` block in `config.example.toml`.
+
 ## Privacy
 
 Your prompts only go to backends you list in `[backends]`. The system honors what you configure; there is no separate "privacy mode."

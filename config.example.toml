@@ -42,11 +42,17 @@ timeout_s    = 60
 
 [backends.local-coder]
 provider     = "openai"
-base_url     = "http://localhost:1234/v1"
+base_url     = "http://localhost:1234/v1"     # static baseline — used when johnny is absent/down
 model        = "qwen2.5-coder-32b-instruct"
 api_key      = "lm-studio"
 aliases      = ["qwen-coder", "coder"]
 timeout_s    = 180
+# Optional johnny binding: when [johnny] is enabled and the 'coder' seat resolves
+# `ready`, johnny's live endpoint/model OVERRIDE the static base_url/model above.
+# Otherwise this backend falls back to its own static config (the override only ever
+# improves on the baseline). Use johnny_seat = "<seat>" to bind a specific seat.
+johnny_role  = "coder"
+# while_loading = "cloud-small"               # per-backend warm-up target (else [routing].while_loading)
 
 # ---- Classifier --------------------------------------------------------
 [classifier]
@@ -61,6 +67,8 @@ timeout_s        = 5
 default_urgency    = "normal"
 default_on_failure = "cloud-large"    # last-resort backend if classifier and fallback both fail.
                                       # Set to a local backend if running offline-only.
+while_loading      = "cloud-small"    # serve here while a johnny-bound seat warms up (a *normal*
+                                      # state on a reaped box — distinct from default_on_failure).
 
 [routing.policy.normal]
 "code,trivial"    = "local-coder"
@@ -85,6 +93,18 @@ default_on_failure = "cloud-large"    # last-resort backend if classifier and fa
 "general,trivial" = "local-small"
 "general,medium"  = "local-small"
 "general,hard"    = "local-large"
+
+# ---- johnny integration (optional) -------------------------------------
+# Present iff any backend has a johnny binding (johnny_role/johnny_seat). johnny is a
+# local-inference manager that owns model lifecycle + liveness; SAINT asks it where a
+# role is and whether it's ready, and (optionally) triggers a non-blocking load.
+# SAINT stays fully functional with johnny absent — bound backends use their static config.
+[johnny]
+transport           = "cli"        # "cli" (shell out to `johnny`) | "http" (johnnyd)
+cli_path            = "johnny"      # CLI transport: the johnny executable
+# base_url          = "http://127.0.0.1:8080"   # HTTP transport: johnnyd base url
+resolve_cache_ttl_s = 1.0           # cache resolve() results this long (hot path)
+ensure_load         = true          # may SAINT trigger loads, or only observe + fall back?
 
 # ---- Logging -----------------------------------------------------------
 [logging]
