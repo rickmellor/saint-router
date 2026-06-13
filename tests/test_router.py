@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from goorouter.config import (
+from saint.config import (
     BackendConfig,
     ClassifierConfig,
     Config,
@@ -11,7 +11,7 @@ from goorouter.config import (
     RoutingConfig,
     ServerConfig,
 )
-from goorouter.router import decide_route
+from saint.router import decide_route
 
 
 def _cfg() -> Config:
@@ -50,9 +50,9 @@ async def test_decide_explain_mode():
     cfg = _cfg()
     payload = json.dumps({"domain": "general", "complexity": "trivial", "reason": "small"})
     response = {"choices": [{"message": {"content": payload}}]}
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=response)):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
         decision = await decide_route(
-            cfg=cfg, model_field="goo-explain",
+            cfg=cfg, model_field="saint-explain",
             messages=[{"role": "user", "content": "hi"}],
         )
     assert decision.mode == "explain"
@@ -64,7 +64,7 @@ async def test_decide_explain_mode():
 async def test_decide_pinned_by_model_field():
     cfg = _cfg()
     decision = await decide_route(
-        cfg=cfg, model_field="goo-cloud-large",
+        cfg=cfg, model_field="saint-cloud-large",
         messages=[{"role": "user", "content": "hi"}],
     )
     assert decision.mode == "dispatch"
@@ -76,7 +76,7 @@ async def test_decide_pinned_by_model_field():
 async def test_decide_pinned_by_prefix_overrides_model_field():
     cfg = _cfg()
     decision = await decide_route(
-        cfg=cfg, model_field="goo-cloud-large",
+        cfg=cfg, model_field="saint-cloud-large",
         messages=[{"role": "user", "content": "!local-small foo"}],
     )
     assert decision.backend == "local-small"
@@ -87,9 +87,9 @@ async def test_decide_auto_runs_classifier():
     cfg = _cfg()
     payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "novel refactor"})
     response = {"choices": [{"message": {"content": payload}}]}
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=response)):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
         decision = await decide_route(
-            cfg=cfg, model_field="goo-auto",
+            cfg=cfg, model_field="saint-auto",
             messages=[{"role": "user", "content": "rewrite this thing"}],
         )
     assert decision.backend == "cloud-large"  # policy.normal["code,hard"]
@@ -101,9 +101,9 @@ async def test_decide_urgency_prefix_changes_policy():
     cfg = _cfg()
     payload = json.dumps({"domain": "general", "complexity": "medium", "reason": "."})
     response = {"choices": [{"message": {"content": payload}}]}
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=response)):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
         decision = await decide_route(
-            cfg=cfg, model_field="goo-auto",
+            cfg=cfg, model_field="saint-auto",
             messages=[{"role": "user", "content": "!urgent help"}],
         )
     # policy.urgent["general,medium"] = cloud-small
@@ -113,10 +113,10 @@ async def test_decide_urgency_prefix_changes_policy():
 
 async def test_decide_classifier_failure_uses_default_on_failure():
     cfg = _cfg()
-    with patch("goorouter.classifier.call_backend",
+    with patch("saint.classifier.call_backend",
                AsyncMock(side_effect=RuntimeError("down"))):
         decision = await decide_route(
-            cfg=cfg, model_field="goo-auto",
+            cfg=cfg, model_field="saint-auto",
             messages=[{"role": "user", "content": "hi"}],
         )
     assert decision.backend == "cloud-large"  # default_on_failure
@@ -124,11 +124,11 @@ async def test_decide_classifier_failure_uses_default_on_failure():
 
 
 async def test_decide_unknown_prefix_raises():
-    from goorouter.prefixes import UnknownPrefixError
+    from saint.prefixes import UnknownPrefixError
     cfg = _cfg()
     with pytest.raises(UnknownPrefixError):
         await decide_route(
-            cfg=cfg, model_field="goo-auto",
+            cfg=cfg, model_field="saint-auto",
             messages=[{"role": "user", "content": "!doesnotexist hi"}],
         )
 
@@ -136,7 +136,7 @@ async def test_decide_unknown_prefix_raises():
 async def test_decide_multimodal_routes_to_default_on_failure():
     cfg = _cfg()
     decision = await decide_route(
-        cfg=cfg, model_field="goo-auto",
+        cfg=cfg, model_field="saint-auto",
         messages=[{"role": "user", "content": [
             {"type": "text", "text": "look at this"},
             {"type": "image_url", "image_url": {"url": "data:..."}},
@@ -148,13 +148,13 @@ async def test_decide_multimodal_routes_to_default_on_failure():
 
 async def test_decide_empty_messages_defaults_general_trivial():
     cfg = _cfg()
-    decision = await decide_route(cfg=cfg, model_field="goo-auto", messages=[])
+    decision = await decide_route(cfg=cfg, model_field="saint-auto", messages=[])
     # policy.normal["general,trivial"] = local-small
     assert decision.backend == "local-small"
     assert decision.classifier_result is None
 
 
-from goorouter.router import apply_stripping
+from saint.router import apply_stripping
 
 
 def test_apply_stripping_replaces_last_user_content():

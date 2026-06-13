@@ -3,13 +3,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from goorouter.classifier import (
+from saint.classifier import (
     ClassifierError,
     classify,
     classify_with_fallback,
     load_prompt_template,
 )
-from goorouter.config import BackendConfig
+from saint.config import BackendConfig
 
 
 def _backend() -> BackendConfig:
@@ -27,7 +27,7 @@ def _response(content: str) -> dict:
 
 async def test_classify_parses_json():
     payload = json.dumps({"domain": "code", "complexity": "medium", "reason": "ok"})
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=_response(payload))):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=_response(payload))):
         result = await classify(_backend(), prompt="refactor X", template=load_prompt_template(None))
     assert result.domain == "code"
     assert result.complexity == "medium"
@@ -37,21 +37,21 @@ async def test_classify_parses_json():
 
 async def test_classify_strips_code_fences():
     payload = '```json\n{"domain":"general","complexity":"trivial","reason":"hi"}\n```'
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=_response(payload))):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=_response(payload))):
         result = await classify(_backend(), prompt="hi", template=load_prompt_template(None))
     assert result.domain == "general"
     assert result.complexity == "trivial"
 
 
 async def test_classify_invalid_json_raises():
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=_response("not json"))):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=_response("not json"))):
         with pytest.raises(ClassifierError):
             await classify(_backend(), prompt="x", template=load_prompt_template(None))
 
 
 async def test_classify_invalid_enum_raises():
     payload = json.dumps({"domain": "wat", "complexity": "medium", "reason": "."})
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=_response(payload))):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=_response(payload))):
         with pytest.raises(ClassifierError):
             await classify(_backend(), prompt="x", template=load_prompt_template(None))
 
@@ -74,7 +74,7 @@ async def test_oversize_skips_primary_uses_fallback():
             return await primary_mock(b, **kw)
         return await fb_mock(b, **kw)
 
-    with patch("goorouter.classifier.call_backend", side_effect=fake_call):
+    with patch("saint.classifier.call_backend", side_effect=fake_call):
         outcome = await classify_with_fallback(
             primary=_backend(), fallback=_other_backend(),
             prompt="x" * 12000, max_input_chars=8000,
@@ -97,7 +97,7 @@ async def test_primary_error_triggers_fallback():
             raise RuntimeError("boom")
         return _response(payload)
 
-    with patch("goorouter.classifier.call_backend", side_effect=fake_call):
+    with patch("saint.classifier.call_backend", side_effect=fake_call):
         outcome = await classify_with_fallback(
             primary=_backend(), fallback=_other_backend(),
             prompt="hi", max_input_chars=8000,
@@ -116,7 +116,7 @@ async def test_no_fallback_oversize_truncates():
         seen_lengths.append(len(messages[0]["content"]))
         return _response(payload)
 
-    with patch("goorouter.classifier.call_backend", side_effect=fake_call):
+    with patch("saint.classifier.call_backend", side_effect=fake_call):
         outcome = await classify_with_fallback(
             primary=_backend(), fallback=None,
             prompt="x" * 12000, max_input_chars=8000,
@@ -132,7 +132,7 @@ async def test_both_fail_returns_none_result():
     async def fake_call(b, **kw):
         raise RuntimeError("everything down")
 
-    with patch("goorouter.classifier.call_backend", side_effect=fake_call):
+    with patch("saint.classifier.call_backend", side_effect=fake_call):
         outcome = await classify_with_fallback(
             primary=_backend(), fallback=_other_backend(),
             prompt="x", max_input_chars=8000,

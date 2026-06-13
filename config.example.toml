@@ -1,4 +1,4 @@
-# goorouter configuration. Copy to ~/.goorouter/config.toml and edit.
+# saint configuration. Copy to ~/.config/saint/config.toml and edit.
 
 [server]
 host = "127.0.0.1"
@@ -60,7 +60,7 @@ backend          = "local-small"      # which backend runs the classifier
 fallback_backend = "local-large"      # used for oversize input or primary failure (optional)
 max_input_chars  = 8000               # primary's input cap (head-truncate if no fallback)
 timeout_s        = 5
-# prompt_template_path = "~/.goorouter/classifier.prompt"   # optional override
+# prompt_template_path = "~/.config/saint/classifier.prompt"   # optional override
 
 # ---- Routing -----------------------------------------------------------
 [routing]
@@ -108,7 +108,7 @@ ensure_load         = true          # may SAINT trigger loads, or only observe +
 
 # ---- Logging -----------------------------------------------------------
 [logging]
-db_path        = "~/.goorouter/log.sqlite"
+db_path        = "~/.config/saint/log.sqlite"
 prompt_storage = "full"   # "full" | "hashed" | "none"
                           # full:   readable later; useful for relabeling and future training
                           # hashed: SHA-256 only; deduplication possible without retaining content

@@ -5,7 +5,7 @@ from typing import Any
 
 import litellm
 
-from goorouter.config import BackendConfig
+from saint.config import BackendConfig
 
 
 def _resolve_api_key(b: BackendConfig) -> str | None:

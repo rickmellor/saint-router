@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "goorouter"
+name = "saint-router"
 version = "0.1.0"
 description = "Localhost OpenAI-compatible router that picks between cloud and local LLMs per request."
 readme = "README.md"
@@ -27,7 +27,12 @@ dev = [
 ]
 
 [project.scripts]
-goorouter = "goorouter.cli:app"
+saint = "saint.cli:app"
+
+# Distribution is `saint-router`, import package is `saint` — names differ, so the
+# wheel target must be explicit (hatchling can't auto-detect it).
+[tool.hatch.build.targets.wheel]
+packages = ["saint"]
 
 [tool.ruff]
 line-length = 110
@@ -39,7 +44,7 @@ select = ["E", "F", "I", "B", "UP", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Typer idiomatically uses function-call defaults like `typer.Option(...)` and
 # `typer.Argument(...)`; B008 is a false positive here.
-"goorouter/cli.py" = ["B008"]
+"saint/cli.py" = ["B008"]
 # Test files: lazy local imports inside test bodies are intentional (fixture
 # isolation, avoiding heavyweight imports during collection); inline test
 # scaffolding sometimes uses `;` for compactness.
@@ -50,7 +55,7 @@ select = ["E", "F", "I", "B", "UP", "RUF"]
 # annotations on FastAPI/typer route handlers and inner closures (where
 # the framework dictates the signature anyway).
 python_version = "3.11"
-files = ["goorouter"]
+files = ["saint"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unreachable = true

@@ -62,7 +62,7 @@ prompt_storage = "full"
 
 
 def test_cli_help_lists_commands():
-    out = subprocess.run([sys.executable, "-m", "goorouter", "--help"],
+    out = subprocess.run([sys.executable, "-m", "saint", "--help"],
                          capture_output=True, text=True)
     assert out.returncode == 0
     for cmd in ("serve", "explain", "policy", "config", "log", "relabel"):
@@ -70,7 +70,7 @@ def test_cli_help_lists_commands():
 
 
 def test_cli_serve_help():
-    out = subprocess.run([sys.executable, "-m", "goorouter", "serve", "--help"],
+    out = subprocess.run([sys.executable, "-m", "saint", "serve", "--help"],
                          capture_output=True, text=True)
     assert out.returncode == 0
     out_low = out.stdout.lower()
@@ -87,9 +87,9 @@ def test_cli_explain_prints_decision(tmp_path):
 
     from typer.testing import CliRunner
 
-    from goorouter import cli as cli_mod
+    from saint import cli as cli_mod
     runner = CliRunner()
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=response)):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
         result = runner.invoke(cli_mod.app, ["explain", "rewrite my code", "--config", str(cfg_path)])
     assert result.exit_code == 0, result.output
     assert "Routing decision" in result.output
@@ -101,7 +101,7 @@ def test_cli_policy_show(tmp_path):
     cfg_path.write_text(SAMPLE_CFG.format(db=(tmp_path / "log.sqlite").as_posix()))
     from typer.testing import CliRunner
 
-    from goorouter import cli as cli_mod
+    from saint import cli as cli_mod
     runner = CliRunner()
     result = runner.invoke(cli_mod.app, ["policy", "show", "--config", str(cfg_path)])
     assert result.exit_code == 0
@@ -116,7 +116,7 @@ def test_cli_config_show_masks_keys(tmp_path, monkeypatch):
     cfg_path.write_text(SAMPLE_CFG.format(db=(tmp_path / "log.sqlite").as_posix()))
     from typer.testing import CliRunner
 
-    from goorouter import cli as cli_mod
+    from saint import cli as cli_mod
     runner = CliRunner()
     result = runner.invoke(cli_mod.app, ["config", "show", "--config", str(cfg_path)])
     assert result.exit_code == 0
@@ -125,7 +125,7 @@ def test_cli_config_show_masks_keys(tmp_path, monkeypatch):
 
 
 def test_cli_log_show_and_id(tmp_path):
-    from goorouter.storage import log_request, open_db
+    from saint.storage import log_request, open_db
     from tests.test_storage import _row
 
     db_path = tmp_path / "log.sqlite"
@@ -139,7 +139,7 @@ def test_cli_log_show_and_id(tmp_path):
 
     from typer.testing import CliRunner
 
-    from goorouter import cli as cli_mod
+    from saint import cli as cli_mod
     runner = CliRunner()
 
     r1 = runner.invoke(cli_mod.app, ["log", "show", "--config", str(cfg_path)])
@@ -157,7 +157,7 @@ def test_cli_log_show_and_id(tmp_path):
 
 
 def test_cli_relabel_last_and_by_id(tmp_path):
-    from goorouter.storage import get_by_id, log_request, open_db
+    from saint.storage import get_by_id, log_request, open_db
     from tests.test_storage import _row
 
     db_path = tmp_path / "log.sqlite"
@@ -171,7 +171,7 @@ def test_cli_relabel_last_and_by_id(tmp_path):
 
     from typer.testing import CliRunner
 
-    from goorouter import cli as cli_mod
+    from saint import cli as cli_mod
     runner = CliRunner()
 
     r = runner.invoke(cli_mod.app, ["relabel", "last", "cloud-large",
@@ -191,7 +191,7 @@ def test_cli_relabel_last_and_by_id(tmp_path):
 
 
 def test_cli_relabel_undefined_backend_rejected(tmp_path):
-    from goorouter.storage import log_request, open_db
+    from saint.storage import log_request, open_db
     from tests.test_storage import _row
 
     db_path = tmp_path / "log.sqlite"
@@ -204,7 +204,7 @@ def test_cli_relabel_undefined_backend_rejected(tmp_path):
 
     from typer.testing import CliRunner
 
-    from goorouter import cli as cli_mod
+    from saint import cli as cli_mod
     runner = CliRunner()
     r = runner.invoke(cli_mod.app, ["relabel", "last", "phantom",
                                      "--config", str(cfg_path)])

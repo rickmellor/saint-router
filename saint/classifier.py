@@ -9,8 +9,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from goorouter.backends import call_backend
-from goorouter.config import BackendConfig
+from saint.backends import call_backend
+from saint.config import BackendConfig
 
 
 def _truncate(value: object, limit: int = 500) -> str:
@@ -103,7 +103,7 @@ def load_prompt_template(path: str | None) -> str:
     if path:
         return Path(path).read_text(encoding="utf-8")
     return (
-        resources.files("goorouter")
+        resources.files("saint")
         .joinpath("classifier_prompt.txt")
         .read_text(encoding="utf-8")
     )

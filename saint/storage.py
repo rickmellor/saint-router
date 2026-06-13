@@ -38,7 +38,7 @@ class LogRow:
 
 
 def _load_migration(name: str) -> str:
-    return resources.files("goorouter.migrations").joinpath(name).read_text()
+    return resources.files("saint.migrations").joinpath(name).read_text()
 
 
 def open_db(path: Path) -> sqlite3.Connection:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from goorouter.config import (
+from saint.config import (
     BackendConfig,
     ClassifierConfig,
     Config,
@@ -103,7 +103,7 @@ def test_config_dataclass_construction():
             },
         ),
         logging=LoggingConfig(
-            db_path="~/.goorouter/log.sqlite",
+            db_path="~/.config/saint/log.sqlite",
             prompt_storage="full",
         ),
     )
@@ -224,7 +224,7 @@ def test_resolve_backend_by_name_or_alias(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_HOME", str(tmp_path))
     p = tmp_path / "c.toml"; p.write_text(EXAMPLE_TOML)
     cfg = load_config(p)
-    from goorouter.config import resolve_backend
+    from saint.config import resolve_backend
 
     assert resolve_backend(cfg, "cloud-large").name == "cloud-large"
     assert resolve_backend(cfg, "opus").name == "cloud-large"

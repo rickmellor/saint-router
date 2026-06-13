@@ -1,8 +1,8 @@
 import json
 from unittest.mock import AsyncMock, patch
 
-from goorouter.explain import format_decision
-from goorouter.router import decide_route
+from saint.explain import format_decision
+from saint.router import decide_route
 from tests.test_router import _cfg
 
 
@@ -12,10 +12,10 @@ async def test_format_decision_explain():
         {"domain": "code", "complexity": "medium", "reason": "scoped refactor"}
     )
     response = {"choices": [{"message": {"content": payload}}]}
-    with patch("goorouter.classifier.call_backend", AsyncMock(return_value=response)):
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
         decision = await decide_route(
             cfg=cfg,
-            model_field="goo-explain",
+            model_field="saint-explain",
             messages=[{"role": "user", "content": "!urgent rewrite x"}],
         )
     text = format_decision(decision, cfg)
@@ -30,7 +30,7 @@ async def test_format_decision_pinned_backend():
     cfg = _cfg()
     decision = await decide_route(
         cfg=cfg,
-        model_field="goo-cloud-large",
+        model_field="saint-cloud-large",
         messages=[{"role": "user", "content": "hi"}],
     )
     text = format_decision(decision, cfg)
@@ -42,7 +42,7 @@ async def test_format_decision_multimodal():
     cfg = _cfg()
     decision = await decide_route(
         cfg=cfg,
-        model_field="goo-auto",
+        model_field="saint-auto",
         messages=[
             {
                 "role": "user",

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from goorouter.storage import SCHEMA_VERSION, LogRow, log_request, open_db, schema_version
+from saint.storage import SCHEMA_VERSION, LogRow, log_request, open_db, schema_version
 
 
 def test_open_db_creates_schema(tmp_path: Path):
@@ -32,7 +32,7 @@ def test_open_db_idempotent(tmp_path: Path):
 def _row(**overrides) -> LogRow:
     base = LogRow(
         request_id="r-1",
-        model_field="goo-auto",
+        model_field="saint-auto",
         prefixes_raw=None,
         pinned_backend=None,
         urgency_used="normal",
@@ -80,7 +80,7 @@ def test_log_request_none_storage(tmp_path):
     assert r == (None, "none")
 
 
-from goorouter.storage import RelabelError, get_by_id, get_recent, relabel_by_id, relabel_last
+from saint.storage import RelabelError, get_by_id, get_recent, relabel_by_id, relabel_last
 
 
 def test_get_recent_orders_by_ts_desc(tmp_path):

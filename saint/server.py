@@ -9,13 +9,13 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from goorouter.binding import resolve_for_dispatch
-from goorouter.config import Config
-from goorouter.explain import format_decision
-from goorouter.johnny import build_resolver, provide_telemetry
-from goorouter.prefixes import UnknownPrefixError
-from goorouter.router import GOO_AUTO, decide_route, dispatch_non_streaming
-from goorouter.storage import LogRow, log_request, open_db
+from saint.binding import resolve_for_dispatch
+from saint.config import Config
+from saint.explain import format_decision
+from saint.johnny import build_resolver, provide_telemetry
+from saint.prefixes import UnknownPrefixError
+from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
+from saint.storage import LogRow, log_request, open_db
 
 # Chat-completion kwargs we forward to the destination backend, beyond
 # `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
@@ -144,18 +144,18 @@ def _extract_forwarded(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
-    app = FastAPI(title="goorouter", version="0.1.0")
+    app = FastAPI(title="saint", version="0.1.0")
     app.state.cfg = cfg
     app.state.db = open_db(db_path)
     app.state.resolver = build_resolver(cfg.johnny)  # None unless any backend is johnny-bound
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
-        ids = ["goo-auto", "goo-explain", *(f"goo-{name}" for name in cfg.backends)]
+        ids = ["saint-auto", "saint-explain", *(f"saint-{name}" for name in cfg.backends)]
         return {
             "object": "list",
             "data": [
-                {"id": mid, "object": "model", "owned_by": "goorouter", "created": 0}
+                {"id": mid, "object": "model", "owned_by": "saint", "created": 0}
                 for mid in ids
             ],
         }
@@ -164,7 +164,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
     async def chat_completions(request: Request) -> Any:
         body = await request.json()
         messages = body.get("messages", [])
-        model_field = body.get("model", GOO_AUTO)
+        model_field = body.get("model", SAINT_AUTO)
         stream = bool(body.get("stream", False))
         tools = body.get("tools")
         tool_choice = body.get("tool_choice")
@@ -200,7 +200,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         if stream:
             from fastapi.responses import StreamingResponse
 
-            from goorouter.router import dispatch_streaming
+            from saint.router import dispatch_streaming
 
             async def gen():
                 started_local = time.monotonic()

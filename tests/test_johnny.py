@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from goorouter.binding import resolve_for_dispatch
-from goorouter.config import load_config
-from goorouter.johnny import Resolution
-from goorouter.storage import SCHEMA_VERSION, _load_migration, open_db, schema_version
+from saint.binding import resolve_for_dispatch
+from saint.config import load_config
+from saint.johnny import Resolution
+from saint.storage import SCHEMA_VERSION, _load_migration, open_db, schema_version
 
 _CELLS = "\n".join(f'"{d},{c}" = "cloud-small"' for d in ("code", "general") for c in ("trivial", "medium", "hard"))
 
@@ -165,7 +165,7 @@ def test_migration_v1_to_v2_roundtrip(tmp_path: Path):
 # --- telemetry provide ---
 def test_provide_telemetry_spool(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    from goorouter import johnny as J
+    from saint import johnny as J
 
     J.provide_telemetry({"seat": "coder@boxA", "latency_ms": 12, "ttft_ms": 40})
     spool = tmp_path / "state" / "johnny" / "ingest" / "saint.jsonl"
@@ -178,6 +178,6 @@ def test_provide_telemetry_spool(tmp_path: Path, monkeypatch):
 def test_provide_telemetry_non_fatal(monkeypatch, capsys):
     # unwritable ingest dir -> must not raise, only stderr
     monkeypatch.setenv("XDG_STATE_HOME", "/proc/cannot-write-here")
-    from goorouter import johnny as J
+    from saint import johnny as J
 
     J.provide_telemetry({"seat": "x"})  # should not raise

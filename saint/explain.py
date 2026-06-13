@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from goorouter.config import Config
-from goorouter.router import RoutingDecision
+from saint.config import Config
+from saint.router import RoutingDecision
 
 
 def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> str:
@@ -52,7 +52,7 @@ def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> st
 
     # johnny binding (liveness-aware; reflects reality, never triggers a load)
     if resolver is not None:
-        from goorouter.binding import describe_for_explain
+        from saint.binding import describe_for_explain
 
         d = describe_for_explain(cfg, decision.backend, resolver)
         if d:

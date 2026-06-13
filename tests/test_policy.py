@@ -1,4 +1,4 @@
-from goorouter.policy import resolve_policy
+from saint.policy import resolve_policy
 
 POLICY = {
     "normal": {

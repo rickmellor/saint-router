@@ -2,8 +2,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from goorouter.backends import call_backend
-from goorouter.config import BackendConfig
+from saint.backends import call_backend
+from saint.config import BackendConfig
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def local_backend() -> BackendConfig:
 async def test_call_anthropic_backend_translates_model(cloud_backend, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     mock = AsyncMock(return_value={"choices": [{"message": {"content": "hi"}}]})
-    with patch("goorouter.backends.litellm.acompletion", mock):
+    with patch("saint.backends.litellm.acompletion", mock):
         await call_backend(cloud_backend, messages=[{"role": "user", "content": "hi"}], stream=False)
     _, kwargs = mock.call_args
     # litellm anthropic models get the "anthropic/" prefix
@@ -39,7 +39,7 @@ async def test_call_anthropic_backend_translates_model(cloud_backend, monkeypatc
 
 async def test_call_openai_compatible_with_base_url(local_backend):
     mock = AsyncMock(return_value={"choices": []})
-    with patch("goorouter.backends.litellm.acompletion", mock):
+    with patch("saint.backends.litellm.acompletion", mock):
         await call_backend(local_backend, messages=[{"role": "user", "content": "x"}], stream=False)
     _, kwargs = mock.call_args
     # OpenAI-compatible endpoints (LM Studio, vLLM, OpenRouter, etc.) need the
@@ -53,7 +53,7 @@ async def test_passes_through_tools(cloud_backend, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     mock = AsyncMock(return_value={"choices": []})
     tools = [{"type": "function", "function": {"name": "search"}}]
-    with patch("goorouter.backends.litellm.acompletion", mock):
+    with patch("saint.backends.litellm.acompletion", mock):
         await call_backend(
             cloud_backend, messages=[{"role": "user", "content": "x"}],
             stream=False, tools=tools, tool_choice="auto",

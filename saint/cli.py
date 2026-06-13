@@ -7,13 +7,13 @@ from pathlib import Path
 import typer
 import uvicorn
 
-from goorouter.config import load_config
+from saint.config import load_config
 
-app = typer.Typer(no_args_is_help=True, help="goorouter — localhost OpenAI-compatible router")
+app = typer.Typer(no_args_is_help=True, help="saint — localhost OpenAI-compatible router")
 
 
 def _default_config_path() -> Path:
-    return Path(os.path.expanduser("~/.goorouter/config.toml"))
+    return Path(os.path.expanduser("~/.config/saint/config.toml"))
 
 
 def _load_or_die(config_path: Path | None):
@@ -51,14 +51,14 @@ def serve(
         s.bind((bind_host, bind_port))
     except OSError:
         typer.secho(
-            f"Port {bind_port} in use; is another `goorouter serve` running?",
+            f"Port {bind_port} in use; is another `saint serve` running?",
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(3) from None
     finally:
         s.close()
 
-    from goorouter.server import build_app
+    from saint.server import build_app
     app_obj = build_app(cfg, db_path=Path(cfg.logging.db_path))
     uvicorn.run(app_obj, host=bind_host, port=bind_port, log_level="info")
 
@@ -71,14 +71,14 @@ def explain(
     """Run the routing pipeline against PROMPT and print the decision."""
     import asyncio
 
-    from goorouter.explain import format_decision
-    from goorouter.router import decide_route
+    from saint.explain import format_decision
+    from saint.router import decide_route
 
     cfg = _load_or_die(config)
 
     async def _run():
         decision = await decide_route(
-            cfg=cfg, model_field="goo-explain",
+            cfg=cfg, model_field="saint-explain",
             messages=[{"role": "user", "content": prompt}],
         )
         print(format_decision(decision, cfg))
@@ -160,7 +160,7 @@ def log_show(
     config: Path | None = typer.Option(None),
 ):
     """Show recent request log rows."""
-    from goorouter.storage import get_recent, open_db
+    from saint.storage import get_recent, open_db
 
     cfg = _load_or_die(config)
     conn = open_db(Path(cfg.logging.db_path))
@@ -179,7 +179,7 @@ def log_id(
     config: Path | None = typer.Option(None),
 ):
     """Show full detail for one log row."""
-    from goorouter.storage import get_by_id, open_db
+    from saint.storage import get_by_id, open_db
 
     cfg = _load_or_die(config)
     conn = open_db(Path(cfg.logging.db_path))
@@ -214,8 +214,8 @@ def relabel_last_cmd(
     config: Path | None = typer.Option(None),
 ):
     """Mark the most recent request as 'should have been <backend>'."""
-    from goorouter.storage import open_db
-    from goorouter.storage import relabel_last as _relabel_last
+    from saint.storage import open_db
+    from saint.storage import relabel_last as _relabel_last
 
     cfg = _load_or_die(config)
     _check_backend_defined(cfg, backend)
@@ -236,8 +236,8 @@ def relabel_by_id_cmd(
     config: Path | None = typer.Option(None),
 ):
     """Mark a specific row id as 'should have been <backend>'."""
-    from goorouter.storage import open_db
-    from goorouter.storage import relabel_by_id as _relabel_by_id
+    from saint.storage import open_db
+    from saint.storage import relabel_by_id as _relabel_by_id
 
     cfg = _load_or_die(config)
     _check_backend_defined(cfg, backend)

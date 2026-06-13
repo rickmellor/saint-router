@@ -13,8 +13,8 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, replace
 
-from goorouter.config import BackendConfig, Config
-from goorouter.johnny import JohnnyResolver
+from saint.config import BackendConfig, Config
+from saint.johnny import JohnnyResolver
 
 
 @dataclass(frozen=True)

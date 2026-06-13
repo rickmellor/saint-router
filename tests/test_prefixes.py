@@ -1,6 +1,6 @@
 import pytest
 
-from goorouter.prefixes import ParsedPrefixes, UnknownPrefixError, parse_prefixes
+from saint.prefixes import ParsedPrefixes, UnknownPrefixError, parse_prefixes
 
 URGENCIES = {"urgent", "patient", "normal"}
 BACKENDS = {"cloud-large": {"opus", "claude"}, "local-coder": {"coder"}, "local-small": set()}

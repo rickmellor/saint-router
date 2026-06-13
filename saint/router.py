@@ -4,20 +4,20 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from goorouter.backends import call_backend
-from goorouter.classifier import (
+from saint.backends import call_backend
+from saint.classifier import (
     ClassifierResult,
     FallbackOutcome,
     classify_with_fallback,
     load_prompt_template,
 )
-from goorouter.config import BackendConfig, Config
-from goorouter.policy import resolve_policy
-from goorouter.prefixes import ParsedPrefixes, parse_prefixes
+from saint.config import BackendConfig, Config
+from saint.policy import resolve_policy
+from saint.prefixes import ParsedPrefixes, parse_prefixes
 
-GOO_AUTO = "goo-auto"
-GOO_EXPLAIN = "goo-explain"
-GOO_PREFIX = "goo-"
+SAINT_AUTO = "saint-auto"
+SAINT_EXPLAIN = "saint-explain"
+SAINT_PREFIX = "saint-"
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ async def decide_route(
 ) -> RoutingDecision:
     request_id = str(uuid.uuid4())
 
-    mode: Literal["dispatch", "explain"] = "explain" if model_field == GOO_EXPLAIN else "dispatch"
+    mode: Literal["dispatch", "explain"] = "explain" if model_field == SAINT_EXPLAIN else "dispatch"
 
     last_user = _last_user_message(messages)
     multimodal = bool(last_user and _is_multimodal_content(last_user.get("content")))
@@ -83,8 +83,8 @@ async def decide_route(
         parsed = parse_prefixes(last_text_original, urgencies, backend_alias_map)
 
     pinned_via_model: str | None = None
-    if model_field.startswith(GOO_PREFIX) and model_field not in (GOO_AUTO, GOO_EXPLAIN):
-        candidate = model_field[len(GOO_PREFIX):]
+    if model_field.startswith(SAINT_PREFIX) and model_field not in (SAINT_AUTO, SAINT_EXPLAIN):
+        candidate = model_field[len(SAINT_PREFIX):]
         if candidate in cfg.backends:
             pinned_via_model = candidate
 

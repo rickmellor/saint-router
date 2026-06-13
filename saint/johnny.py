@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
-from goorouter.config import JohnnyConfig
+from saint.config import JohnnyConfig
 
 
 @dataclass(frozen=True)
