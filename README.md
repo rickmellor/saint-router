@@ -5,9 +5,8 @@ Localhost OpenAI-compatible router that picks between cloud and local LLM backen
 ## Quickstart
 
 ```
-uv tool install saint         # or: pipx install saint / pip install saint
-mkdir -p ~/.config/saint
-cp config.example.toml ~/.config/saint/config.toml
+uv tool install saint-router  # or: pipx install saint-router / pip install saint-router
+saint config init             # writes ~/.config/saint/config.toml from the bundled template
 # Edit ~/.config/saint/config.toml — point local backends at your LM Studio,
 # set ANTHROPIC_API_KEY in your environment for cloud backends.
 export ANTHROPIC_API_KEY=...      # if using cloud backends
@@ -57,6 +56,7 @@ Your prompts only go to backends you list in `[backends]`. The system honors wha
 saint serve                              # start the proxy
 saint explain "<prompt>"                 # print routing decision (no backend call)
 saint policy show                        # dump resolved policy tables
+saint config init [--path P] [--force]   # write a starter config from the bundled template
 saint config show                        # dump validated config (api keys masked)
 saint log show [--limit N] [--backend X] # tail recent requests
 saint log id <ID>                        # full detail of one request
@@ -66,6 +66,6 @@ saint relabel by-id <ID> <backend>       # same, by id
 
 ## Configuration reference
 
-See [`config.example.toml`](./config.example.toml) for the full schema with comments. Every field is documented inline.
+See [`config.example.toml`](./saint/config.example.toml) for the full schema with comments. Every field is documented inline.
 
 The full design lives at [`openspec/changes/add-initial-router/`](./openspec/changes/add-initial-router/).

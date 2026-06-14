@@ -1,4 +1,4 @@
-# saint configuration. Copy to ~/.config/saint/config.toml and edit.
+# saint configuration. Generate your own with `saint config init`, then edit.
 
 [server]
 host = "127.0.0.1"

@@ -149,6 +149,29 @@ def config_show(config: Path | None = typer.Option(None, help="Path to config.to
         print("Cloud backends present: no (offline-only)")
 
 
+@config_app.command("init")
+def config_init(
+    path: Path | None = typer.Option(None, "--path", help="Where to write (default ~/.config/saint/config.toml)."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing config."),
+):
+    """Write a starter config from the bundled template."""
+    import importlib.resources
+
+    target = path or _default_config_path()
+    if target.exists() and not force:
+        typer.secho(f"config already exists: {target}  (use --force to overwrite)",
+                    fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(1)
+    tmpl = importlib.resources.files("saint").joinpath("config.example.toml")
+    if not tmpl.is_file():
+        typer.secho("bundled config template is missing from the package", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(tmpl.read_text())
+    typer.secho(f"✓ wrote {target}", fg=typer.colors.GREEN)
+    typer.echo("Next: edit it (backends / API keys / the [johnny] binding), then `saint serve`.")
+
+
 log_app = typer.Typer(help="Inspect request log.")
 app.add_typer(log_app, name="log")
 
