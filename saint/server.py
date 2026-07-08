@@ -16,7 +16,7 @@ from saint.johnny import build_resolver, provide_telemetry
 from saint.prefixes import UnknownPrefixError
 from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
 from saint.backends import call_embeddings
-from saint.dispatch import dispatch_candidates, run_candidates
+from saint.dispatch import BedrockRuntime, dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
 from saint.storage import LogRow, build_log_row, log_request, open_db
 
@@ -188,6 +188,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                        if cfg.cache.conversation_affinity else None),
     )
     app.state.breaker = Breaker(cfg.routing.breaker_failures, cfg.routing.breaker_cooldown_s)
+    app.state.bedrock_state = BedrockRuntime()
     if cfg.has_bedrock:
         from saint.bedrock_auth import apply_bedrock_auth_patch
         apply_bedrock_auth_patch()
@@ -277,6 +278,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             result, error_kind, _ = await run_candidates(
                 cfg=cfg, candidates=candidates, rid=rid,
                 resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
+                bedrock_state=app.state.bedrock_state,
             )
 
             if result is None:
@@ -368,6 +370,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         result, error_kind, last_eff = await run_candidates(
             cfg=cfg, candidates=candidates, rid=rid,
             resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
+            bedrock_state=app.state.bedrock_state,
         )
         success = result is not None
         served = result.backend if result else None

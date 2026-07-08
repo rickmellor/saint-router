@@ -100,6 +100,7 @@ class Breaker:
         self.cooldown_s = cooldown_s
         self._failures: dict[str, int] = {}
         self._open_until: dict[str, float] = {}
+        self._auth_flagged: set[str] = set()
 
     def record_failure(self, backend: str) -> None:
         n = self._failures.get(backend, 0) + 1
@@ -107,9 +108,20 @@ class Breaker:
         if n >= self.threshold:
             self._open_until[backend] = time.monotonic() + self.cooldown_s
 
+    def open_now(self, backend: str, cooldown_s: float) -> None:
+        """Force the circuit open — auth failure: retrying is pointless until the
+        credentials refresh, so skip the threshold and use the (longer) auth cooldown."""
+        self._failures[backend] = self.threshold
+        self._open_until[backend] = time.monotonic() + cooldown_s
+        self._auth_flagged.add(backend)
+
+    def is_auth_flagged(self, backend: str) -> bool:
+        return backend in self._auth_flagged
+
     def record_success(self, backend: str) -> None:
         self._failures.pop(backend, None)
         self._open_until.pop(backend, None)
+        self._auth_flagged.discard(backend)
 
     def is_open(self, backend: str) -> bool:
         until = self._open_until.get(backend)
