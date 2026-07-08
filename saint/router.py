@@ -166,13 +166,15 @@ async def decide_route(
     messages: list[dict[str, Any]],
     caches: RouteCaches | None = None,   # server passes app.state.route_caches; CLI passes nothing
     session_id: str | None = None,       # x-session-id header / session_id body field
+    multimodal_override: bool | None = None,  # /v1/messages supplies Anthropic-aware detection
 ) -> RoutingDecision:
     request_id = str(uuid.uuid4())
 
     mode: Literal["dispatch", "explain"] = "explain" if model_field == SAINT_EXPLAIN else "dispatch"
 
     last_user = _last_user_message(messages)
-    multimodal = bool(last_user and _is_multimodal_content(last_user.get("content")))
+    multimodal = (multimodal_override if multimodal_override is not None
+                  else bool(last_user and _is_multimodal_content(last_user.get("content"))))
     full_text = _content_text(last_user.get("content")) if last_user else None
     # classifier + log view of the message: client-injected context cut off.
     # `full_text` (via parsed.stripped) is what dispatch forwards.

@@ -93,6 +93,17 @@ def _cache_tokens(usage: dict) -> tuple[int | None, int | None]:
     return read, write
 
 
+def _provide_telemetry_for(eff, latency_ms, ttft_ms, tokens_in, tokens_out, success):
+    """johnny telemetry when the seat actually served (module-level twin of the chat
+    endpoint's closure, for other endpoints)."""
+    if eff is not None and eff.state_at_dispatch == "johnny_ready" and eff.johnny_seat:
+        provide_telemetry({
+            "seat": eff.johnny_seat, "ts": int(time.time()),
+            "latency_ms": latency_ms, "ttft_ms": ttft_ms,
+            "tokens_in": tokens_in, "tokens_out": tokens_out, "success": success,
+        })
+
+
 def _emit_summary(decision, model_field: str, gen_ms: int,
                   cache_read=None, cache_write=None, served=None) -> None:
     out = decision.classifier_outcome
@@ -405,6 +416,110 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         payload = response if isinstance(response, dict) else response.model_dump()
         return JSONResponse(content=payload,
                             headers=_route_headers(decision, served, eff))
+
+    @app.post("/v1/messages")
+    async def anthropic_messages_endpoint(request: Request) -> Any:
+        from saint.anthropic_api import (
+            anthropic_error,
+            anthropic_usage,
+            build_dispatch_params,
+            detect_multimodal,
+            last_user_text,
+            messages_model_field,
+            openai_view,
+            strip_prefix_from_messages,
+        )
+        from saint.backends import call_backend_messages
+
+        body = await request.json()
+        client_model = body.get("model") or ""
+        if body.get("max_tokens") is None:
+            return anthropic_error(400, "invalid_request_error", "max_tokens is required")
+        stream = bool(body.get("stream", False))
+
+        session_id = (request.headers.get("x-session-id")
+                      or (body.get("metadata") or {}).get("user_id"))
+        try:
+            decision = await decide_route(
+                cfg=cfg, model_field=messages_model_field(cfg, client_model),
+                messages=openai_view(body),
+                caches=app.state.route_caches, session_id=session_id,
+                multimodal_override=detect_multimodal(body.get("messages", [])),
+            )
+        except UnknownPrefixError as e:
+            return anthropic_error(400, "invalid_request_error", str(e))
+
+        _emit_decision_warnings(decision)
+
+        if decision.mode == "explain":
+            text = format_decision(decision, cfg, resolver=app.state.resolver)
+            return JSONResponse(content={
+                "id": f"msg_{decision.request_id[:12]}", "type": "message",
+                "role": "assistant", "model": client_model,
+                "content": [{"type": "text", "text": text}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            })
+
+        breaker = app.state.breaker
+        candidates = dispatch_candidates(cfg, decision.backend, breaker)
+        params = build_dispatch_params(body)
+        if decision.parsed.raw:  # strip !/@ routing prefixes before the backend sees them
+            params["messages"] = strip_prefix_from_messages(params["messages"],
+                                                            decision.parsed.raw)
+        rid = decision.request_id[:8]
+
+        def _log_state(eff, served: str) -> str | None:
+            return "dispatch_fallback" if served != decision.backend else eff.state_at_dispatch
+
+        def _log_messages_row(*, served, eff, latency_ms, success, error_kind, usage,
+                              backend_override):
+            _safe_log(app.state.db, build_log_row(
+                decision=decision, model_field=client_model or "anthropic-messages",
+                backend_latency_ms=latency_ms,
+                success=success, error_kind=error_kind,
+                tokens_in=usage.get("input_tokens"),
+                tokens_out=usage.get("output_tokens"),
+                prompt_storage_mode=cfg.logging.prompt_storage,
+                johnny_seat=eff.johnny_seat if eff else None,
+                state_at_dispatch=_log_state(eff, served) if served else None,
+                cache_read_tokens=usage.get("cache_read_input_tokens"),
+                cache_write_tokens=usage.get("cache_creation_input_tokens"),
+                backend_override=backend_override,
+            ))
+
+        started = time.monotonic()
+
+        async def _attempt(eff_c):
+            return await call_backend_messages(eff_c.backend, params=params, stream=stream)
+
+        result, error_kind, last_eff = await run_candidates(
+            cfg=cfg, candidates=candidates, rid=rid,
+            resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
+            bedrock_state=app.state.bedrock_state,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        if result is None:
+            _log_messages_row(served=None, eff=last_eff, latency_ms=latency_ms,
+                              success=False, error_kind=error_kind, usage={},
+                              backend_override=None)
+            return anthropic_error(502, "api_error", f"backend error: {error_kind}")
+
+        usage = anthropic_usage(result.value)
+        _log_messages_row(served=result.backend, eff=result.eff, latency_ms=latency_ms,
+                          success=True, error_kind=None, usage=usage,
+                          backend_override=result.backend)
+        _provide_telemetry_for(result.eff, latency_ms, None, usage.get("input_tokens"),
+                               usage.get("output_tokens"), True)
+        _emit_summary(decision, client_model or "anthropic-messages", latency_ms,
+                      cache_read=usage.get("cache_read_input_tokens"),
+                      cache_write=usage.get("cache_creation_input_tokens"),
+                      served=result.backend)
+        payload = (result.value if isinstance(result.value, dict)
+                   else result.value.model_dump())
+        return JSONResponse(content=payload,
+                            headers=_route_headers(decision, result.backend, result.eff))
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Any:

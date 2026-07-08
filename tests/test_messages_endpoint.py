@@ -1,0 +1,181 @@
+import json
+from dataclasses import replace
+from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
+
+from saint.server import build_app
+from tests.test_router import _cfg
+
+_ANTHROPIC_OK = {
+    "id": "msg_01", "type": "message", "role": "assistant", "model": "m",
+    "content": [{"type": "text", "text": "hello"}],
+    "stop_reason": "end_turn",
+    "usage": {"input_tokens": 40, "output_tokens": 5,
+              "cache_creation_input_tokens": 30, "cache_read_input_tokens": 0},
+}
+
+_CLS = json.dumps({"domain": "code", "complexity": "medium", "reason": "."})
+_CLS_RESP = {"choices": [{"message": {"content": _CLS}}]}
+
+
+def _app(tmp_path, cfg=None):
+    app = build_app(cfg or _cfg(), db_path=tmp_path / "log.sqlite")
+    return app, TestClient(app)
+
+
+def _row(tmp_path, query):
+    import sqlite3
+    return sqlite3.connect(tmp_path / "log.sqlite").execute(query).fetchone()
+
+
+def test_messages_pinned_passthrough_headers_and_log(tmp_path):
+    app, client = _app(tmp_path)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate):
+        resp = client.post("/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 100,
+            "system": "you are helpful",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content"][0]["text"] == "hello"
+    assert resp.headers["x-saint-backend"] == "cloud-large"
+    kw = acreate.call_args.kwargs
+    assert kw["model"] == "anthropic/claude-opus-4-7"
+    assert kw["max_tokens"] == 100 and kw["system"] == "you are helpful"
+    row = _row(tmp_path, "SELECT model_field, backend_chosen, tokens_in, tokens_out, "
+                         "cache_write_tokens, success FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == ("saint-cloud-large", "cloud-large", 40, 5, 30, 1)
+
+
+def test_messages_alias_pins_and_unknown_routes_auto(tmp_path):
+    cfg = _cfg()
+    backends = dict(cfg.backends)
+    backends["cloud-large"] = replace(backends["cloud-large"],
+                                      aliases=("opus", "global.anthropic.claude-opus-4-8"))
+    cfg = replace(cfg, backends=backends)
+    app, client = _app(tmp_path, cfg)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    clf = AsyncMock(return_value=_CLS_RESP)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate), \
+         patch("saint.classifier.call_backend", clf):
+        # raw inference-profile id -> alias pin, no classification
+        r1 = client.post("/v1/messages", json={
+            "model": "global.anthropic.claude-opus-4-8", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}]})
+        # unknown model -> auto (classifier runs)
+        r2 = client.post("/v1/messages", json={
+            "model": "claude-mystery-9", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "write me a widget parser"}]})
+    assert r1.headers["x-saint-backend"] == "cloud-large"
+    assert clf.call_count == 1
+    assert r2.headers["x-saint-backend"] == "local-coder"  # policy code,medium
+    assert r2.headers["x-saint-domain"] == "code"
+
+
+def test_messages_missing_max_tokens_anthropic_400(tmp_path):
+    _, client = _app(tmp_path)
+    resp = client.post("/v1/messages", json={
+        "model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+
+
+def test_messages_prefixes_parsed_and_stripped(tmp_path):
+    app, client = _app(tmp_path)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate):
+        resp = client.post("/v1/messages", json={
+            "model": "auto", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "@opus review this design"}]})
+    assert resp.headers["x-saint-backend"] == "cloud-large"
+    assert resp.headers["x-saint-pinned"] == "cloud-large"
+    sent = acreate.call_args.kwargs["messages"]
+    assert sent[-1]["content"] == "review this design"  # prefix stripped for the backend
+
+
+def test_messages_tool_result_turn_is_not_multimodal(tmp_path):
+    app, client = _app(tmp_path)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    clf = AsyncMock(return_value=_CLS_RESP)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate), \
+         patch("saint.classifier.call_backend", clf):
+        # first turn establishes conversation labels
+        client.post("/v1/messages", json={
+            "model": "auto", "max_tokens": 10,
+            "system": "agent",
+            "messages": [{"role": "user",
+                          "content": "refactor the widget parser to stream tokens"}]})
+        # agent tool turn: last user message is a tool_result block
+        resp = client.post("/v1/messages", json={
+            "model": "auto", "max_tokens": 10,
+            "system": "agent",
+            "messages": [
+                {"role": "user", "content": "refactor the widget parser to stream tokens"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "reading"},
+                    {"type": "tool_use", "id": "t1", "name": "read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1",
+                     "content": [{"type": "text", "text": "def parse(): ..."}]}]},
+            ]})
+    # NOT routed to default_on_failure/multimodal; inherited the conversation's labels
+    assert resp.headers["x-saint-backend"] == "local-coder"
+    assert resp.headers["x-saint-classifier"] in ("inherited", "cache")
+    assert clf.call_count == 1  # only the first turn classified
+
+
+def test_messages_image_block_routes_multimodal(tmp_path):
+    cfg = _cfg()
+    cfg = replace(cfg, routing=replace(cfg.routing, multimodal_backend="local-small"))
+    app, client = _app(tmp_path, cfg)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate):
+        resp = client.post("/v1/messages", json={
+            "model": "auto", "max_tokens": 10,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                             "data": "x"}}]}]})
+    assert resp.headers["x-saint-backend"] == "local-small"
+
+
+def test_messages_dispatch_failover_and_502_shape(tmp_path):
+    cfg = _cfg()
+    backends = dict(cfg.backends)
+    backends["cloud-large"] = replace(backends["cloud-large"], on_error="local-small")
+    cfg = replace(cfg, backends=backends)
+    app, client = _app(tmp_path, cfg)
+    req = {"model": "saint-cloud-large", "max_tokens": 10,
+           "messages": [{"role": "user", "content": "hi"}]}
+    with patch("saint.backends.litellm.anthropic.messages.acreate",
+               AsyncMock(side_effect=[RuntimeError("boom"), RuntimeError("boom"),
+                                      _ANTHROPIC_OK])):
+        resp = client.post("/v1/messages", json=req)
+    assert resp.status_code == 200
+    assert resp.headers["x-saint-backend"] == "local-small"
+    assert resp.headers["x-saint-decided"] == "cloud-large"
+    with patch("saint.backends.litellm.anthropic.messages.acreate",
+               AsyncMock(side_effect=RuntimeError("boom"))):
+        resp2 = client.post("/v1/messages", json=req)
+    assert resp2.status_code == 502
+    assert resp2.json()["error"]["type"] == "api_error"
+
+
+def test_messages_client_cache_control_passes_through_unmodified(tmp_path):
+    app, client = _app(tmp_path)
+    big = "You are a meticulous reviewer. " * 400  # over prompt_cache_min_chars
+    sys_blocks = [{"type": "text", "text": big, "cache_control": {"type": "ephemeral"}}]
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate):
+        client.post("/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 10,
+            "system": sys_blocks,
+            "messages": [{"role": "user", "content": "go"}]})
+    kw = acreate.call_args.kwargs
+    assert kw["system"] == sys_blocks          # untouched, single breakpoint
+    assert kw["messages"] == [{"role": "user", "content": "go"}]  # no injection

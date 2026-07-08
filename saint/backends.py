@@ -163,6 +163,24 @@ async def call_backend(
     return await litellm.acompletion(**_shape_request(backend, kwargs))
 
 
+async def call_backend_messages(backend: BackendConfig, *, params: dict[str, Any],
+                                stream: bool) -> Any:
+    """Dispatch an Anthropic Messages API request via litellm's anthropic interface.
+
+    Native passthrough for anthropic/bedrock backends; openai-compatible backends go
+    through litellm's messages→completion translation. Returns an
+    AnthropicMessagesResponse, or an async iterator of Anthropic-format SSE bytes when
+    stream=True."""
+    kwargs: dict[str, Any] = {
+        "model": _resolve_model_id(backend),
+        "timeout": backend.timeout_s,
+        **_provider_kwargs(backend),
+        **params,
+    }
+    return await litellm.anthropic.messages.acreate(
+        stream=stream, **_shape_request(backend, kwargs))
+
+
 async def call_embeddings(backend: BackendConfig, input: Any) -> Any:
     """Dispatch an embeddings request (str or list of str) to a backend."""
     kwargs: dict[str, Any] = {
