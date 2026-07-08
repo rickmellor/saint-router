@@ -133,6 +133,36 @@ while_loading      = "cloud-small"    # serve here while a johnny-bound seat war
 "general,medium"  = "local-chat"
 "general,hard"    = "local-chat"
 
+# ---- Caching (agent-loop economics) -------------------------------------
+# Agent clients (pi, hermes, opencode) turn one prompt into N API calls: the last
+# user message repeats while tool history grows. Defaults are designed-on.
+[cache]
+# Turn cache: classify a given (message, urgency) once; loop turns reuse the labels.
+# Kills classifier flap (nondeterministic medium->hard re-rolls escalating one turn
+# to cloud) and per-turn classifier latency. Logged as classifier_used = "cache";
+# excluded from classifier training.
+turn_cache        = true
+turn_ttl_s        = 300      # spans an agent loop; matches Anthropic's 5-min cache
+turn_max_entries  = 1024
+# Conversation affinity: keyed by hash(first system msg + first non-system msg) —
+# or an explicit `x-session-id` header / `session_id` body field. Short follow-ups
+# ("yes, do that") inherit the conversation's labels instead of classifying out of
+# context (classifier_used = "inherited"). TTL is SLIDING (refreshed each turn):
+# active work keeps affinity alive, walking away expires it.
+conversation_affinity     = true
+conversation_ttl_s        = 900
+conversation_max_entries  = 512
+short_follow_up_max_chars = 40
+# sticky_conversations = true   # always inherit (OpenRouter-style); off by default —
+                                # a session that starts trivial would pin hard prompts local.
+# Anthropic prompt caching: rolling cache_control breakpoints on the system message
+# and the last text message (5-min TTL; reads 0.1x, writes 1.25x input price).
+# Explicit pins, explain, and non-anthropic backends are unaffected; OpenAI-provider
+# backends cache implicitly with no breakpoints needed.
+anthropic_prompt_caching = true
+prompt_cache_min_chars   = 4000   # skip tiny prompts (below Anthropic's cacheable minimum)
+# anthropic_cache_ttl    = "1h"   # longer cache window at 2x write cost (default 5m)
+
 # ---- johnny integration (optional) -------------------------------------
 # Present iff any backend has a johnny binding (johnny_role/johnny_seat). johnny is a
 # local-inference manager that owns model lifecycle + liveness; SAINT asks it where a

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pathlib import Path
 
-from saint.backends import call_backend
+from saint.backends import call_backend, inject_cache_control
 from saint.classifier import (
     ClassifierError,
     ClassifierResult,
@@ -313,17 +313,36 @@ def apply_stripping(
     return out
 
 
+def _prepare_dispatch(
+    cfg: Config, decision: RoutingDecision, messages: list[dict[str, Any]],
+    tools: list[dict] | None, effective_backend: BackendConfig | None,
+) -> tuple[BackendConfig, list[dict[str, Any]], list[dict] | None]:
+    """Shared dispatch prep: prefix stripping + Anthropic prompt-cache injection.
+    Injection keys off the EFFECTIVE backend, so johnny-overridden seats (provider
+    'openai') skip it naturally and a cloud while_loading target gets it."""
+    out_messages = apply_stripping(messages, decision.stripped_last_user)
+    backend = effective_backend or cfg.backends[decision.backend]
+    out_tools = tools
+    if cfg.cache.anthropic_prompt_caching and backend.provider == "anthropic":
+        out_messages, out_tools = inject_cache_control(
+            out_messages, tools,
+            min_chars=cfg.cache.prompt_cache_min_chars,
+            ttl=cfg.cache.anthropic_cache_ttl,
+        )
+    return backend, out_messages, out_tools
+
+
 async def dispatch_non_streaming(
     cfg: Config, decision: RoutingDecision, messages: list[dict[str, Any]],
     *, tools: list[dict] | None = None, tool_choice: Any = None,
     extra_params: dict[str, Any] | None = None,
     effective_backend: BackendConfig | None = None,
 ) -> Any:
-    out_messages = apply_stripping(messages, decision.stripped_last_user)
-    backend = effective_backend or cfg.backends[decision.backend]
+    backend, out_messages, out_tools = _prepare_dispatch(
+        cfg, decision, messages, tools, effective_backend)
     return await call_backend(
         backend, messages=out_messages, stream=False,
-        tools=tools, tool_choice=tool_choice,
+        tools=out_tools, tool_choice=tool_choice,
         extra_params=extra_params,
     )
 
@@ -334,10 +353,10 @@ async def dispatch_streaming(
     extra_params: dict[str, Any] | None = None,
     effective_backend: BackendConfig | None = None,
 ) -> Any:
-    out_messages = apply_stripping(messages, decision.stripped_last_user)
-    backend = effective_backend or cfg.backends[decision.backend]
+    backend, out_messages, out_tools = _prepare_dispatch(
+        cfg, decision, messages, tools, effective_backend)
     return await call_backend(
         backend, messages=out_messages, stream=True,
-        tools=tools, tool_choice=tool_choice,
+        tools=out_tools, tool_choice=tool_choice,
         extra_params=extra_params,
     )
