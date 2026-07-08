@@ -15,6 +15,7 @@ from saint.explain import format_decision
 from saint.johnny import build_resolver, provide_telemetry
 from saint.prefixes import UnknownPrefixError
 from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
+from saint.route_cache import RouteCaches, TTLCache
 from saint.storage import LogRow, build_log_row, log_request, open_db
 
 # Chat-completion kwargs we forward to the destination backend, beyond
@@ -62,20 +63,50 @@ def _safe_log(db, row: LogRow) -> None:
         )
 
 
-def _emit_summary(decision, model_field: str, gen_ms: int) -> None:
-    cls_part = (
-        f"classified={decision.classifier_result.domain}/{decision.classifier_result.complexity}"
-        if decision.classifier_result else (
-            "pinned" if decision.pinned_backend else "skipped"
-        )
-    )
+def _usage_dict(response: Any) -> dict:
+    """Usage dict from a dict OR a litellm pydantic ModelResponse (the old isinstance(dict)
+    check silently dropped token accounting for real non-streaming responses)."""
+    if isinstance(response, dict):
+        return response.get("usage") or {}
+    if hasattr(response, "model_dump"):
+        return (response.model_dump().get("usage")) or {}
+    return {}
+
+
+def _cache_tokens(usage: dict) -> tuple[int | None, int | None]:
+    """(cache_read, cache_write) tokens from litellm usage. Anthropic surfaces top-level
+    cache_read_input_tokens/cache_creation_input_tokens; OpenAI implicit caching only
+    populates prompt_tokens_details.cached_tokens."""
+    ptd = usage.get("prompt_tokens_details") or {}
+    read = usage.get("cache_read_input_tokens")
+    if read is None:
+        read = ptd.get("cached_tokens")
+    write = usage.get("cache_creation_input_tokens")
+    if write is None:
+        write = ptd.get("cache_creation_tokens")
+    return read, write
+
+
+def _emit_summary(decision, model_field: str, gen_ms: int,
+                  cache_read=None, cache_write=None) -> None:
+    out = decision.classifier_outcome
+    if decision.classifier_result:
+        cls_part = (f"classified={decision.classifier_result.domain}"
+                    f"/{decision.classifier_result.complexity}")
+        if out is not None and out.classifier_used in ("cache", "inherited"):
+            cls_part += f" ({out.classifier_used})"
+    else:
+        cls_part = "pinned" if decision.pinned_backend else "skipped"
     cls_lat = (
         decision.classifier_result.latency_ms if decision.classifier_result else None
     )
+    pc_part = ""
+    if cache_read or cache_write:
+        pc_part = f", pc r/w {cache_read or 0}/{cache_write or 0}"
     print(
         f"[router] req#{decision.request_id[:8]} model={model_field} "
         f"urgency={decision.urgency} {cls_part} → {decision.backend} "
-        f"(cls {cls_lat}ms gen {gen_ms}ms)",
+        f"(cls {cls_lat}ms gen {gen_ms}ms{pc_part})",
         flush=True,
     )
 
@@ -117,6 +148,12 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
     app.state.cfg = cfg
     app.state.db = open_db(db_path)
     app.state.resolver = build_resolver(cfg.johnny)  # None unless any backend is johnny-bound
+    app.state.route_caches = RouteCaches(
+        turns=(TTLCache(cfg.cache.turn_ttl_s, cfg.cache.turn_max_entries)
+               if cfg.cache.turn_cache else None),
+        conversations=(TTLCache(cfg.cache.conversation_ttl_s, cfg.cache.conversation_max_entries)
+                       if cfg.cache.conversation_affinity else None),
+    )
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
@@ -139,8 +176,15 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         tool_choice = body.get("tool_choice")
         extra = _extract_forwarded(body)
 
+        # session_id (body field or x-session-id header) keys conversation affinity;
+        # it is never forwarded upstream (absent from _FORWARDED_PARAMS).
+        session_id = request.headers.get("x-session-id") or body.get("session_id")
+
         try:
-            decision = await decide_route(cfg=cfg, model_field=model_field, messages=messages)
+            decision = await decide_route(
+                cfg=cfg, model_field=model_field, messages=messages,
+                caches=app.state.route_caches, session_id=session_id,
+            )
         except UnknownPrefixError as e:
             return JSONResponse(
                 status_code=400,
@@ -176,6 +220,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 first_chunk_ts: float | None = None
                 tokens_in_total = 0
                 tokens_out_total = 0
+                cache_read_total = 0
+                cache_write_total = 0
                 error_kind_local: str | None = None
                 success_local = False
                 try:
@@ -201,6 +247,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         tokens_out_total = max(
                             tokens_out_total, usage.get("completion_tokens", 0) or 0
                         )
+                        c_read, c_write = _cache_tokens(usage)
+                        cache_read_total = max(cache_read_total, c_read or 0)
+                        cache_write_total = max(cache_write_total, c_write or 0)
                         import json as _json
                         yield f"data: {_json.dumps(chunk_dict)}\n\n"
                     yield "data: [DONE]\n\n"
@@ -222,9 +271,13 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         tokens_out=tokens_out_total or None,
                         prompt_storage_mode=cfg.logging.prompt_storage,
                         johnny_seat=eff.johnny_seat, state_at_dispatch=eff.state_at_dispatch,
+                        cache_read_tokens=cache_read_total or None,
+                        cache_write_tokens=cache_write_total or None,
                     ))
                     _provide(elapsed_ms, ttft_ms, tokens_in_total or None, tokens_out_total or None, success_local)
-                    _emit_summary(decision, model_field, elapsed_ms)
+                    _emit_summary(decision, model_field, elapsed_ms,
+                                  cache_read=cache_read_total or None,
+                                  cache_write=cache_write_total or None)
 
             return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -241,7 +294,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         backend_latency_ms = int((time.monotonic() - started) * 1000)
 
-        usage = (response or {}).get("usage", {}) if isinstance(response, dict) else {}
+        usage = _usage_dict(response)
+        cache_read, cache_write = _cache_tokens(usage)
         _safe_log(app.state.db, build_log_row(
             decision=decision, model_field=model_field,
             backend_latency_ms=backend_latency_ms,
@@ -250,10 +304,12 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             tokens_out=usage.get("completion_tokens"),
             prompt_storage_mode=cfg.logging.prompt_storage,
             johnny_seat=eff.johnny_seat, state_at_dispatch=eff.state_at_dispatch,
+            cache_read_tokens=cache_read, cache_write_tokens=cache_write,
         ))
         # non-streaming: TTFT not separable -> total latency only
         _provide(backend_latency_ms, None, usage.get("prompt_tokens"), usage.get("completion_tokens"), success)
-        _emit_summary(decision, model_field, backend_latency_ms)
+        _emit_summary(decision, model_field, backend_latency_ms,
+                      cache_read=cache_read, cache_write=cache_write)
 
         if not success:
             raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")

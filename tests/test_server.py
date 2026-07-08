@@ -128,3 +128,114 @@ def test_stdout_summary_line(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "[router]" in captured.out
     assert "cloud-large" in captured.out
+
+
+def _sqlite_row(tmp_path, query):
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "log.sqlite")
+    return conn.execute(query).fetchone()
+
+
+def test_cache_tokens_logged_non_streaming_dict_and_pydantic(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    usage = {"prompt_tokens": 9000, "completion_tokens": 50,
+             "cache_read_input_tokens": 8712, "cache_creation_input_tokens": 130}
+    dict_resp = {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                     "finish_reason": "stop"}],
+        "usage": usage,
+    }
+
+    from pydantic import BaseModel
+
+    class _Pydanticish(BaseModel):  # shaped like litellm's ModelResponse
+        choices: list
+        usage: dict
+
+    for mock_resp in (dict_resp, _Pydanticish(**dict_resp)):
+        with patch("saint.backends.litellm.acompletion", AsyncMock(return_value=mock_resp)):
+            client.post("/v1/chat/completions", json={
+                "model": "saint-cloud-large",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+        row = _sqlite_row(tmp_path,
+            "SELECT cache_read_tokens, cache_write_tokens, tokens_in FROM requests "
+            "ORDER BY id DESC LIMIT 1")
+        assert row == (8712, 130, 9000)
+
+
+def test_cache_tokens_logged_streaming_final_chunk(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 5000, "completion_tokens": 7,
+                   "prompt_tokens_details": {"cached_tokens": 4200,
+                                             "cache_creation_tokens": 300}}},
+    ]
+    with patch("saint.backends.litellm.acompletion",
+               AsyncMock(return_value=_FakeStreamChunks(chunks))):
+        with client.stream("POST", "/v1/chat/completions", json={
+            "model": "saint-cloud-large",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }) as resp:
+            "".join(resp.iter_text())
+    row = _sqlite_row(tmp_path,
+        "SELECT cache_read_tokens, cache_write_tokens FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == (4200, 300)
+
+
+def test_turn_cache_end_to_end(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    payload = json.dumps({"domain": "code", "complexity": "medium", "reason": "."})
+    clf = AsyncMock(return_value={"choices": [{"message": {"content": payload}}]})
+    backend_response = {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    req = {"model": "saint-auto",
+           "messages": [{"role": "user", "content": "refactor the widget parser to stream tokens please"}]}
+    with patch("saint.classifier.call_backend", clf), \
+         patch("saint.backends.litellm.acompletion", AsyncMock(return_value=backend_response)):
+        client.post("/v1/chat/completions", json=req)
+        client.post("/v1/chat/completions", json=req)
+    assert clf.call_count == 1
+    row = _sqlite_row(tmp_path,
+        "SELECT classifier_used, classifier_latency_ms FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == ("cache", 0)
+
+
+def test_session_id_header_inheritance_end_to_end(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "."})
+    clf = AsyncMock(return_value={"choices": [{"message": {"content": payload}}]})
+    backend_response = {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    hdr = {"x-session-id": "pi-session-1"}
+    with patch("saint.classifier.call_backend", clf), \
+         patch("saint.backends.litellm.acompletion", AsyncMock(return_value=backend_response)):
+        client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "saint-auto",
+            "messages": [{"role": "user",
+                          "content": "explore the saint-router repo and refactor decide_route"}]})
+        # different first message, same session id → same conversation; short follow-up inherits
+        client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "saint-auto",
+            "messages": [{"role": "user", "content": "yes, do that"}]})
+    assert clf.call_count == 1
+    row = _sqlite_row(tmp_path,
+        "SELECT classifier_used, backend_chosen FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == ("inherited", "cloud-large")  # policy.normal[code,hard]
