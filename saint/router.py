@@ -18,6 +18,14 @@ from saint.classifier import (
 from saint.config import BackendConfig, Config
 from saint.policy import resolve_policy
 from saint.prefixes import ParsedPrefixes, parse_prefixes
+from saint.route_cache import (
+    CachedLabels,
+    ConversationEntry,
+    RouteCaches,
+    content_text as _content_text,
+    conversation_key,
+    turn_key,
+)
 
 # Trained embedding heads are cached by path, invalidated on mtime (so `classifier train`
 # takes effect without a restart).
@@ -83,6 +91,22 @@ async def _classify_for_route(cfg: Config, prompt: str) -> FallbackOutcome:
         input_truncated_from=(len(prompt) if len(prompt) > len(text) else None),
     )
 
+def _outcome_from_labels(labels: CachedLabels, used: str, clf_input: str) -> FallbackOutcome:
+    """Rebuild a FallbackOutcome from cached labels. `used` is 'cache' (turn cache) or
+    'inherited' (conversation affinity); both are excluded from classifier training
+    (storage.fetch_training_rows) so reuse never manufactures training rows."""
+    return FallbackOutcome(
+        result=ClassifierResult(
+            domain=labels.domain, complexity=labels.complexity,
+            reason=f"{labels.reason} [reused from {labels.source}]", latency_ms=0,
+        ),
+        classifier_used=used,
+        fallback_reason=None,
+        input_chars=len(clf_input),
+        input_truncated_from=None,
+    )
+
+
 SAINT_AUTO = "saint-auto"
 SAINT_EXPLAIN = "saint-explain"
 SAINT_PREFIX = "saint-"
@@ -119,15 +143,6 @@ def _is_multimodal_content(content: Any) -> bool:
     return False
 
 
-def _content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
-        return "\n".join(parts)
-    return ""
-
-
 def _cut_at_markers(text: str, markers: tuple[str, ...]) -> str:
     """Truncate at the earliest occurrence of any classifier.ignore_after marker.
 
@@ -149,6 +164,8 @@ async def decide_route(
     cfg: Config,
     model_field: str,
     messages: list[dict[str, Any]],
+    caches: RouteCaches | None = None,   # server passes app.state.route_caches; CLI passes nothing
+    session_id: str | None = None,       # x-session-id header / session_id body field
 ) -> RoutingDecision:
     request_id = str(uuid.uuid4())
 
@@ -208,7 +225,22 @@ async def decide_route(
         if cfg.classifier.ignore_after else parsed.stripped
     )
 
-    if last_user is None or not clf_input.strip():
+    # Routing caches participate only for real dispatches with no pin and no multimodal
+    # content (pins/multimodal returned above; explain and CLI paths bypass here).
+    use_caches = caches is not None and mode == "dispatch"
+    conv_key = (
+        conversation_key(messages, session_id)
+        if use_caches and caches.conversations is not None else None
+    )
+    conv_entry: ConversationEntry | None = (
+        caches.conversations.get(conv_key) if conv_key else None
+    )
+
+    outcome: FallbackOutcome | None = None
+    labels: CachedLabels | None = None  # canonical labels behind `outcome`, for cache writes
+    empty_input = last_user is None or not clf_input.strip()
+
+    if empty_input and conv_entry is None:
         backend = resolve_policy(cfg.routing.policy, urgency, "general", "trivial")
         return RoutingDecision(
             request_id=request_id, mode=mode, backend=backend,
@@ -219,13 +251,44 @@ async def decide_route(
             stripped_last_user=parsed.stripped if full_text is not None else None,
         )
 
-    outcome = await _classify_for_route(cfg, clf_input)
+    # (a) empty input (incl. injection-only after ignore_after) inherits when it can;
+    # (b) short follow-ups inherit the conversation's labels instead of classifying
+    #     "yes, do that" out of context; sticky_conversations inherits regardless.
+    if conv_entry is not None and (
+        empty_input
+        or cfg.cache.sticky_conversations
+        or len(clf_input) < cfg.cache.short_follow_up_max_chars
+    ):
+        labels = conv_entry.labels
+        outcome = _outcome_from_labels(labels, "inherited", clf_input)
+
+    # (c) turn cache: agent-loop turns repeat the same last user message.
+    tk = turn_key(clf_input, urgency)
+    if outcome is None and use_caches and caches.turns is not None:
+        hit = caches.turns.get(tk)
+        if hit is not None:
+            labels = hit
+            outcome = _outcome_from_labels(labels, "cache", clf_input)
+
+    # (d) classify; cache labels on success (never cache failures).
+    if outcome is None:
+        outcome = await _classify_for_route(cfg, clf_input)
+        if outcome.result is not None:
+            labels = CachedLabels(
+                domain=outcome.result.domain, complexity=outcome.result.complexity,
+                reason=outcome.result.reason, source=outcome.classifier_used or "?",
+            )
+            if use_caches and caches.turns is not None:
+                caches.turns.set(tk, labels)
 
     if outcome.result is None:
         backend = cfg.routing.default_on_failure
     else:
         backend = resolve_policy(cfg.routing.policy, urgency,
                                   outcome.result.domain, outcome.result.complexity)
+        # (e) refresh conversation affinity every successful turn — the sliding TTL.
+        if conv_key and labels is not None:
+            caches.conversations.set(conv_key, ConversationEntry(labels=labels, backend=backend))
     return RoutingDecision(
         request_id=request_id, mode=mode, backend=backend,
         pinned_backend=None, urgency=urgency, parsed=parsed,

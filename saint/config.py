@@ -82,6 +82,28 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class CacheConfig:
+    """Routing decision caches + provider prompt caching (agent-loop economics).
+
+    Agent clients turn one user prompt into N API calls with the same last user
+    message and growing tool history. Without these, every turn re-classifies (flap
+    risk at label boundaries) and every cloud turn re-pays for the full prefix.
+    """
+
+    turn_cache: bool = True
+    turn_ttl_s: float = 300.0            # spans an agent loop; matches Anthropic's 5-min cache
+    turn_max_entries: int = 1024
+    conversation_affinity: bool = True
+    conversation_ttl_s: float = 900.0    # sliding: refreshed each turn; walk-away expires it
+    conversation_max_entries: int = 512
+    short_follow_up_max_chars: int = 40  # follow-ups shorter than this inherit the conversation's labels
+    sticky_conversations: bool = False   # always-inherit (OpenRouter-style); off by default
+    anthropic_prompt_caching: bool = True
+    prompt_cache_min_chars: int = 4000   # ~1k tokens; below Anthropic's cacheable minimum, skip
+    anthropic_cache_ttl: str | None = None   # None = 5m default; "1h" allowed (2x write cost)
+
+
+@dataclass(frozen=True)
 class Config:
     server: ServerConfig
     backends: dict[str, BackendConfig]
@@ -89,6 +111,7 @@ class Config:
     routing: RoutingConfig
     logging: LoggingConfig
     johnny: JohnnyConfig | None = None  # present iff any backend is johnny-bound
+    cache: CacheConfig = CacheConfig()
 
 
 def _expand(value: str) -> str:
@@ -199,6 +222,25 @@ def _validate(cfg: Config) -> list[str]:
             f"routing.while_loading '{cfg.routing.while_loading}' is not defined in [backends]"
         )
 
+    # --- cache knobs ---
+    c = cfg.cache
+    if c.turn_ttl_s <= 0:
+        errors.append("cache.turn_ttl_s must be > 0")
+    if c.conversation_ttl_s <= 0:
+        errors.append("cache.conversation_ttl_s must be > 0")
+    if c.turn_max_entries < 1:
+        errors.append("cache.turn_max_entries must be >= 1")
+    if c.conversation_max_entries < 1:
+        errors.append("cache.conversation_max_entries must be >= 1")
+    if c.short_follow_up_max_chars < 0:
+        errors.append("cache.short_follow_up_max_chars must be >= 0")
+    if c.prompt_cache_min_chars < 0:
+        errors.append("cache.prompt_cache_min_chars must be >= 0")
+    if c.anthropic_cache_ttl not in (None, "1h"):
+        errors.append(
+            f"cache.anthropic_cache_ttl '{c.anthropic_cache_ttl}' must be '5m' (default) or '1h'"
+        )
+
     return errors
 
 
@@ -283,6 +325,22 @@ def load_config(path: Path) -> Config:
         prompt_storage=log_raw.get("prompt_storage", "full"),
     )
 
+    c_raw = raw.get("cache", {})
+    cache_ttl = c_raw.get("anthropic_cache_ttl")
+    cache = CacheConfig(
+        turn_cache=bool(c_raw.get("turn_cache", True)),
+        turn_ttl_s=float(c_raw.get("turn_ttl_s", 300.0)),
+        turn_max_entries=int(c_raw.get("turn_max_entries", 1024)),
+        conversation_affinity=bool(c_raw.get("conversation_affinity", True)),
+        conversation_ttl_s=float(c_raw.get("conversation_ttl_s", 900.0)),
+        conversation_max_entries=int(c_raw.get("conversation_max_entries", 512)),
+        short_follow_up_max_chars=int(c_raw.get("short_follow_up_max_chars", 40)),
+        sticky_conversations=bool(c_raw.get("sticky_conversations", False)),
+        anthropic_prompt_caching=bool(c_raw.get("anthropic_prompt_caching", True)),
+        prompt_cache_min_chars=int(c_raw.get("prompt_cache_min_chars", 4000)),
+        anthropic_cache_ttl=None if cache_ttl in (None, "5m") else cache_ttl,
+    )
+
     cfg = Config(
         server=server,
         backends=backends,
@@ -290,6 +348,7 @@ def load_config(path: Path) -> Config:
         routing=routing,
         logging=logging_cfg,
         johnny=johnny,
+        cache=cache,
     )
     errors = _validate(cfg)
     if errors:
