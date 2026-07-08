@@ -96,6 +96,82 @@ def test_cli_explain_prints_decision(tmp_path):
     assert "code" in result.output and "hard" in result.output
 
 
+def test_cli_explain_logs_classification(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "novel refactor"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        result = runner.invoke(cli_mod.app, ["explain", "rewrite my code", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert "Logged as row #1" in result.output
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT model_field, classifier_domain, classifier_complexity, prompt_content, "
+        "backend_latency_ms, tokens_in, tokens_out FROM requests"
+    ).fetchall()
+    conn.close()
+    assert rows == [("saint-explain", "code", "hard", "rewrite my code", None, None, None)]
+
+
+def test_cli_explain_test_flag_skips_logging(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "general", "complexity": "trivial", "reason": "greeting"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        result = runner.invoke(
+            cli_mod.app, ["explain", "Hello.", "--test", "--config", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.output
+    assert "Not logged (--test)." in result.output
+    assert not db_path.exists()
+
+
+def test_cli_log_clear(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "novel refactor"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        runner.invoke(cli_mod.app, ["explain", "rewrite my code", "--config", str(cfg_path)])
+
+    # declining the confirmation leaves the row in place
+    result = runner.invoke(cli_mod.app, ["log", "clear", "--config", str(cfg_path)], input="n\n")
+    assert result.exit_code != 0  # typer.confirm(abort=True)
+
+    result = runner.invoke(cli_mod.app, ["log", "clear", "--yes", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert "Deleted 1 rows" in result.output
+
+    result = runner.invoke(cli_mod.app, ["log", "clear", "--yes", "--config", str(cfg_path)])
+    assert result.exit_code == 0
+    assert "already empty" in result.output
+
+
 def test_cli_policy_show(tmp_path):
     cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(SAMPLE_CFG.format(db=(tmp_path / "log.sqlite").as_posix()))

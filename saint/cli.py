@@ -67,12 +67,20 @@ def serve(
 def explain(
     prompt: str = typer.Argument(..., help="Prompt text to classify and route (no backend call)"),
     config: Path | None = typer.Option(None, help="Path to config.toml"),
+    test: bool = typer.Option(
+        False, "--test", help="Dry run: don't log the classification to the request log."
+    ),
 ):
-    """Run the routing pipeline against PROMPT and print the decision."""
+    """Run the routing pipeline against PROMPT and print the decision.
+
+    The classification is logged to the request log (it's a labeled training example
+    for `saint classifier train`) unless --test is given.
+    """
     import asyncio
 
     from saint.explain import format_decision
     from saint.router import decide_route
+    from saint.storage import build_log_row, log_request, open_db
 
     cfg = _load_or_die(config)
 
@@ -82,6 +90,27 @@ def explain(
             messages=[{"role": "user", "content": prompt}],
         )
         print(format_decision(decision, cfg))
+        if test:
+            print("Not logged (--test).")
+            return
+        try:
+            conn = open_db(Path(cfg.logging.db_path))
+            row_id = log_request(conn, build_log_row(
+                decision, model_field="saint-explain",
+                backend_latency_ms=None, success=True, error_kind=None,
+                tokens_in=None, tokens_out=None,
+                prompt_storage_mode=cfg.logging.prompt_storage,
+            ))
+            conn.close()
+        except Exception as e:  # logging must never mask the decision output
+            typer.secho(f"log write failed: {type(e).__name__}: {e}",
+                        fg=typer.colors.YELLOW, err=True)
+            return
+        note = ""
+        if cfg.logging.prompt_storage != "full":
+            note = (f" — prompt_storage={cfg.logging.prompt_storage!r}, "
+                    "so this row can't be used for classifier training")
+        print(f"Logged as row #{row_id}{note}.")
 
     asyncio.run(_run())
 
@@ -219,6 +248,26 @@ def log_id(
         if k == "prompt_content" and v and len(str(v)) > 500:
             v = str(v)[:500] + "...(truncated)"
         print(f"{k:<32} {v}")
+
+
+@log_app.command("clear")
+def log_clear(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    config: Path | None = typer.Option(None),
+):
+    """Delete ALL request log rows (including accumulated classifier training data)."""
+    from saint.storage import clear_requests, open_db
+
+    cfg = _load_or_die(config)
+    conn = open_db(Path(cfg.logging.db_path))
+    (count,) = conn.execute("SELECT COUNT(*) FROM requests").fetchone()
+    if count == 0:
+        print("Request log is already empty.")
+        return
+    if not yes:
+        typer.confirm(f"Delete all {count} request log rows?", abort=True)
+    deleted = clear_requests(conn)
+    print(f"Deleted {deleted} rows; ids restart at 1.")
 
 
 relabel_app = typer.Typer(help="Mark requests with corrected backend.")

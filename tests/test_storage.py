@@ -132,3 +132,21 @@ def test_relabel_no_rows_raises(tmp_path):
     conn = open_db(tmp_path / "log.sqlite")
     with pytest.raises(RelabelError):
         relabel_last(conn, "cloud-large", note=None)
+
+
+def test_clear_requests_empties_and_resets_ids(tmp_path):
+    from saint.storage import clear_requests
+
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(request_id="a"))
+    log_request(conn, _row(request_id="b"))
+    assert clear_requests(conn) == 2
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone() == (0,)
+    assert log_request(conn, _row(request_id="c")) == 1  # ids restart
+
+
+def test_clear_requests_empty_db(tmp_path):
+    from saint.storage import clear_requests
+
+    conn = open_db(tmp_path / "log.sqlite")
+    assert clear_requests(conn) == 0

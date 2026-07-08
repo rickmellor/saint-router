@@ -15,7 +15,7 @@ from saint.explain import format_decision
 from saint.johnny import build_resolver, provide_telemetry
 from saint.prefixes import UnknownPrefixError
 from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
-from saint.storage import LogRow, log_request, open_db
+from saint.storage import LogRow, build_log_row, log_request, open_db
 
 # Chat-completion kwargs we forward to the destination backend, beyond
 # `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
@@ -48,37 +48,6 @@ def _explain_response(decision_text: str, model_field: str) -> dict[str, Any]:
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
-
-
-def _build_log_row(decision, model_field, backend_latency_ms, success, error_kind,
-                    tokens_in, tokens_out, prompt_storage_mode,
-                    johnny_seat=None, state_at_dispatch=None):
-    out = decision.classifier_outcome
-    return LogRow(
-        request_id=decision.request_id,
-        model_field=model_field,
-        prefixes_raw=decision.parsed.raw or None,
-        pinned_backend=decision.pinned_backend,
-        urgency_used=decision.urgency,
-        classifier_used=out.classifier_used if out else None,
-        classifier_fallback_reason=out.fallback_reason if out else None,
-        classifier_input_chars=out.input_chars if out else None,
-        classifier_input_truncated_from=out.input_truncated_from if out else None,
-        classifier_latency_ms=(out.result.latency_ms if out and out.result else None),
-        classifier_domain=(out.result.domain if out and out.result else None),
-        classifier_complexity=(out.result.complexity if out and out.result else None),
-        classifier_reason=(out.result.reason if out and out.result else None),
-        backend_chosen=decision.backend,
-        backend_latency_ms=backend_latency_ms,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        success=success,
-        error_kind=error_kind,
-        prompt_content=decision.last_user_content_original,
-        prompt_storage_mode=prompt_storage_mode,
-        johnny_seat=johnny_seat,
-        state_at_dispatch=state_at_dispatch,
-    )
 
 
 def _safe_log(db, row: LogRow) -> None:
@@ -245,7 +214,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 finally:
                     elapsed_ms = int((time.monotonic() - started_local) * 1000)
                     ttft_ms = int((first_chunk_ts - started_local) * 1000) if first_chunk_ts else None
-                    _safe_log(app.state.db, _build_log_row(
+                    _safe_log(app.state.db, build_log_row(
                         decision=decision, model_field=model_field,
                         backend_latency_ms=elapsed_ms,
                         success=success_local, error_kind=error_kind_local,
@@ -273,7 +242,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         backend_latency_ms = int((time.monotonic() - started) * 1000)
 
         usage = (response or {}).get("usage", {}) if isinstance(response, dict) else {}
-        _safe_log(app.state.db, _build_log_row(
+        _safe_log(app.state.db, build_log_row(
             decision=decision, model_field=model_field,
             backend_latency_ms=backend_latency_ms,
             success=success, error_kind=error_kind,

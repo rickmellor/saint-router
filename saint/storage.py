@@ -37,6 +37,39 @@ class LogRow:
     state_at_dispatch: str | None = None  # johnny_ready|static_baseline|while_loading|fallback|None
 
 
+def build_log_row(decision, *, model_field, backend_latency_ms, success, error_kind,
+                  tokens_in, tokens_out, prompt_storage_mode,
+                  johnny_seat=None, state_at_dispatch=None) -> LogRow:
+    """Map a RoutingDecision (+ dispatch outcome) to a LogRow. Dispatch-less callers
+    (e.g. `saint explain`) pass backend_latency_ms/tokens as None."""
+    out = decision.classifier_outcome
+    return LogRow(
+        request_id=decision.request_id,
+        model_field=model_field,
+        prefixes_raw=decision.parsed.raw or None,
+        pinned_backend=decision.pinned_backend,
+        urgency_used=decision.urgency,
+        classifier_used=out.classifier_used if out else None,
+        classifier_fallback_reason=out.fallback_reason if out else None,
+        classifier_input_chars=out.input_chars if out else None,
+        classifier_input_truncated_from=out.input_truncated_from if out else None,
+        classifier_latency_ms=(out.result.latency_ms if out and out.result else None),
+        classifier_domain=(out.result.domain if out and out.result else None),
+        classifier_complexity=(out.result.complexity if out and out.result else None),
+        classifier_reason=(out.result.reason if out and out.result else None),
+        backend_chosen=decision.backend,
+        backend_latency_ms=backend_latency_ms,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        success=success,
+        error_kind=error_kind,
+        prompt_content=decision.last_user_content_original,
+        prompt_storage_mode=prompt_storage_mode,
+        johnny_seat=johnny_seat,
+        state_at_dispatch=state_at_dispatch,
+    )
+
+
 def _load_migration(name: str) -> str:
     return resources.files("saint.migrations").joinpath(name).read_text()
 
@@ -110,6 +143,23 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
         ),
     )
     return int(cursor.lastrowid or 0)
+
+
+def clear_requests(conn: sqlite3.Connection) -> int:
+    """Delete every request log row and restart ids at 1. Returns rows deleted.
+
+    Truncates through the live connection (schema/WAL intact), so it's safe while
+    `saint serve` holds the DB open — unlike deleting the file, which would leave the
+    server logging into an unlinked inode.
+    """
+    (count,) = conn.execute("SELECT COUNT(*) FROM requests").fetchone()
+    conn.execute("DELETE FROM requests")
+    try:
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'requests'")
+    except sqlite3.OperationalError:
+        pass  # sqlite_sequence doesn't exist until the first AUTOINCREMENT insert
+    conn.execute("VACUUM")
+    return int(count)
 
 
 class RelabelError(ValueError):
