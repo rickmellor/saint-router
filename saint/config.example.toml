@@ -7,8 +7,17 @@ port = 4000
 # ---- Backends ----------------------------------------------------------
 # Names are arbitrary identifiers. `aliases` give short names you can use
 # as !-prefixes (e.g. "!opus") in the latest user message.
-# API keys: prefer `api_key_env` (read from the named environment variable);
-# `api_key` is allowed but warned for non-LM-Studio providers.
+# API keys: prefer `api_key_env` (read from the named environment variable) for
+# real keys; local OpenAI-compatible servers (vLLM, llama.cpp) ignore the key,
+# so a literal placeholder like api_key = "local" is fine there.
+#
+# The local backends below follow the johnny "run profile" pattern: each seat in
+# the profile has a fixed port and a role (see `johnny profile save`). The static
+# base_url is the profile's port — a valid fallback even across reboots — and
+# `johnny_role` binds the backend to live resolution: on every dispatch SAINT asks
+# `johnny resolve <role>` and, when the seat is ready, johnny's live endpoint/model
+# OVERRIDE the static base_url/model. SAINT stays fully functional with johnny
+# absent — bound backends just use their static config.
 
 [backends.cloud-large]
 provider     = "anthropic"
@@ -24,45 +33,47 @@ api_key_env  = "ANTHROPIC_API_KEY"
 aliases      = ["haiku"]
 timeout_s    = 60
 
-[backends.local-large]
-provider     = "openai"
-base_url     = "http://localhost:1234/v1"
-model        = "qwen2.5-32b-instruct"
-api_key      = "lm-studio"
-aliases      = ["qwen32"]
-timeout_s    = 180
-
-[backends.local-small]
-provider     = "openai"
-base_url     = "http://localhost:1234/v1"
-model        = "qwen2.5-3b-instruct"
-api_key      = "lm-studio"
-aliases      = ["qwen3"]
-timeout_s    = 60
-
 [backends.local-coder]
 provider     = "openai"
-base_url     = "http://localhost:1234/v1"     # static baseline — used when johnny is absent/down
-model        = "qwen2.5-coder-32b-instruct"
-api_key      = "lm-studio"
-aliases      = ["qwen-coder", "coder"]
+base_url     = "http://localhost:8003/v1"     # static fallback = the profile's 'coder' port
+model        = "qwen-27b-coder"
+api_key      = "local"
+aliases      = ["coder"]
 timeout_s    = 180
-# Optional johnny binding: when [johnny] is enabled and the 'coder' seat resolves
-# `ready`, johnny's live endpoint/model OVERRIDE the static base_url/model above.
-# Otherwise this backend falls back to its own static config (the override only ever
-# improves on the baseline). Use johnny_seat = "<seat>" to bind a specific seat.
 johnny_role  = "coder"
 # while_loading = "cloud-small"               # per-backend warm-up target (else [routing].while_loading)
+# Use johnny_seat = "<seat>" instead of johnny_role to bind a specific seat by name.
+
+[backends.local-chat]
+provider     = "openai"
+base_url     = "http://localhost:8002/v1"     # static fallback = the profile's 'chat' port
+model        = "gemma-4-26B-A4B-it-FP8-Dynamic"
+api_key      = "local"
+aliases      = ["gemma"]
+timeout_s    = 180
+johnny_role  = "chat"
 
 # ---- Embedding backend (optional) --------------------------------------
 # A local embeddings endpoint (e.g. nomic-embed served by johnny on CPU). Only needed
 # for classifier.mode = "embedding". provider/model still required for config validity.
 [backends.local-embed]
-provider  = "openai"
-base_url  = "http://localhost:8001/v1"        # your /v1/embeddings endpoint
-model     = "nomic-embed-text-v1.5"
-api_key   = "x"
-timeout_s = 10
+provider     = "openai"
+base_url     = "http://localhost:8001/v1"     # static fallback = the profile's 'embed' port
+model        = "nomic-embed"
+api_key      = "local"
+timeout_s    = 10
+johnny_role  = "embed"
+
+# A small, fast model for the LLM classifier — e.g. a quantized 1B GGUF on CPU via
+# johnny's llama.cpp backend (`johnny induct <gguf> --device cpu`), leaving the GPUs
+# to the seats that answer.
+[backends.local-classifier]
+provider     = "openai"
+base_url     = "http://localhost:8000/v1"     # static fallback = the profile's 'classifier' port
+model        = "gemma-3-1B-it-QAT-Q4_0"
+api_key      = "local"
+timeout_s    = 10
+johnny_role  = "classifier"
 
 # ---- Classifier --------------------------------------------------------
 [classifier]
@@ -70,17 +81,17 @@ timeout_s = 10
 # mode = "embedding": embed the prompt (embedding_backend) + a tiny trained head — ~50-100x
 #   faster on CPU, deterministic. It falls back to the LLM classifier (backend below) when
 #   the head is untrained or below min_confidence, so `backend` is still required.
-#   Train it with `saint classifier train` after some traffic in mode="llm" with
-#   logging.prompt_storage = "full" (it distills the LLM's own labels).
+# Bootstrap path: run in mode="llm" with logging.prompt_storage = "full" until
+#   `saint classifier status` shows enough labeled rows, then `saint classifier train`
+#   (it distills the LLM's own labels) and flip mode = "embedding".
 mode              = "llm"
-backend           = "local-small"      # the LLM classifier (and the embedding-mode fallback)
-fallback_backend  = "local-large"      # used for oversize input or primary failure (optional)
-embedding_backend = "local-embed"      # required when mode = "embedding"
+backend           = "local-classifier"  # the LLM classifier (and the embedding-mode fallback)
+fallback_backend  = "local-chat"        # used for oversize input or primary failure (optional)
+embedding_backend = "local-embed"       # required when mode = "embedding"
 min_confidence    = 0.6                 # below this, the head defers to the LLM classifier
 # head_path       = "~/.config/saint/classifier_head.npz"   # trained head (default shown)
-max_input_chars   = 8000               # primary's input cap (head-truncate if no fallback)
-timeout_s         = 5
-# prompt_template_path = "~/.config/saint/classifier.prompt"   # optional override
+max_input_chars   = 8000                # primary's input cap (head-truncate if no fallback)
+timeout_s         = 10                  # allow headroom for a CPU-served classifier seat
 
 # ---- Routing -----------------------------------------------------------
 [routing]
@@ -94,8 +105,8 @@ while_loading      = "cloud-small"    # serve here while a johnny-bound seat war
 "code,trivial"    = "local-coder"
 "code,medium"     = "local-coder"
 "code,hard"       = "cloud-large"
-"general,trivial" = "local-small"
-"general,medium"  = "local-large"
+"general,trivial" = "local-chat"
+"general,medium"  = "local-chat"
 "general,hard"    = "cloud-large"
 
 [routing.policy.urgent]
@@ -106,13 +117,14 @@ while_loading      = "cloud-small"    # serve here while a johnny-bound seat war
 "general,medium"  = "cloud-small"
 "general,hard"    = "cloud-large"
 
+# patient = prefer local even when slower; hard cells stay on the strongest local seats.
 [routing.policy.patient]
 "code,trivial"    = "local-coder"
 "code,medium"     = "local-coder"
-"code,hard"       = "local-large"
-"general,trivial" = "local-small"
-"general,medium"  = "local-small"
-"general,hard"    = "local-large"
+"code,hard"       = "local-coder"
+"general,trivial" = "local-chat"
+"general,medium"  = "local-chat"
+"general,hard"    = "local-chat"
 
 # ---- johnny integration (optional) -------------------------------------
 # Present iff any backend has a johnny binding (johnny_role/johnny_seat). johnny is a
