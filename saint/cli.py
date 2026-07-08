@@ -450,10 +450,13 @@ def classifier_status(
         print("head              = (not trained — run `saint classifier train`)")
 
     conn = open_db(Path(cfg.logging.db_path))
-    mix = classifier_traffic_mix(conn, 500)
+    # Window = routed traffic the CURRENT head has served (since trained_at); explain/
+    # seeding rows are excluded so old dataset batches can't taint the stats.
+    mix = classifier_traffic_mix(conn, 500, since=head.trained_at if head else None)
     classified = mix["head"] + mix["llm"]
     print()
-    print(f"recent traffic (last {sum(mix.values())} classified rows):")
+    window = "routed traffic since head trained" if head else "recent routed traffic"
+    print(f"{window} ({sum(mix.values())} classified rows, explain/seed excluded):")
     print(f"  head answered   = {mix['head']}")
     print(f"  llm answered    = {mix['llm']}"
           + ("  (head deferrals)" if cfg.classifier.mode == "embedding" else ""))
@@ -484,8 +487,10 @@ def classifier_status(
         from saint.policy import resolve_policy
 
         # Deferred/LLM-labeled rows are exactly the trainer's input: the head declined
-        # these (or mode was 'llm'), and the LLM's labels are the reference.
-        raw = fetch_training_rows(conn, limit=limit * 3)
+        # these (or mode was 'llm'), and the LLM's labels are the reference. Only rows
+        # AFTER trained_at count — replaying the head over its own training set would
+        # flatter it.
+        raw = fetch_training_rows(conn, limit=limit * 3, since=head.trained_at)
         seen: set[str] = set()
         rows = []
         for prompt, dom, cplx in raw:
@@ -496,10 +501,12 @@ def classifier_status(
             if len(rows) >= limit:
                 break
         if not rows:
-            print("\ndrift: no LLM-labeled rows to compare against")
+            print("\ndrift: no LLM-labeled rows since training to compare against")
         else:
             prompts = [r[0] for r in rows]
-            print(f"\ndrift check: replaying head over {len(rows)} recent LLM-labeled rows…")
+            small_n = "  (small sample)" if len(rows) < 30 else ""
+            print(f"\ndrift check: replaying head over {len(rows)} LLM-labeled rows "
+                  f"since training…{small_n}")
 
             async def _embed():
                 chunks = []

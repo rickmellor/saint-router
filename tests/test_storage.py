@@ -225,3 +225,23 @@ def test_count_training_rows_since(tmp_path):
     log_request(conn, _row(classifier_used="cache", prompt_content="cached prompt"))
     log_request(conn, _row(classifier_used="local-embed (embed-head)", prompt_content="head prompt"))
     assert count_training_rows_since(conn, "2000-01-01T00:00:00+00:00") == 1
+
+
+def test_traffic_mix_excludes_explain_and_respects_since(tmp_path):
+    from saint.storage import classifier_traffic_mix
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(classifier_used="local-chat", model_field="saint-explain"))  # seed/diagnostic
+    log_request(conn, _row(classifier_used="local-chat"))
+    log_request(conn, _row(classifier_used="local-embed (embed-head)"))
+    assert classifier_traffic_mix(conn, 100) == {"head": 1, "llm": 1, "reused": 0}
+    # a future `since` excludes everything
+    assert classifier_traffic_mix(conn, 100, since="2999-01-01T00:00:00+00:00") == \
+        {"head": 0, "llm": 0, "reused": 0}
+
+
+def test_fetch_training_rows_since_filter(tmp_path):
+    from saint.storage import fetch_training_rows
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(classifier_used="local-chat"))
+    assert len(fetch_training_rows(conn, 10)) == 1
+    assert fetch_training_rows(conn, 10, since="2999-01-01T00:00:00+00:00") == []

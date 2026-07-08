@@ -154,37 +154,50 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
     return int(cursor.lastrowid or 0)
 
 
-def fetch_training_rows(conn: sqlite3.Connection, limit: int) -> list[tuple]:
+def fetch_training_rows(
+    conn: sqlite3.Connection, limit: int, since: str | None = None,
+) -> list[tuple]:
     """Recent (prompt, domain, complexity) rows usable for classifier distillation.
 
     Excludes rows labeled by the embedding head itself (no self-distillation feedback
     loop) and by the routing caches ('cache'/'inherited' — reused labels, not fresh
-    classifier judgments)."""
+    classifier judgments). `since` restricts to rows after an ISO-8601 UTC timestamp
+    (drift checks use the head's trained_at so the sample isn't its own training set)."""
     return conn.execute(
         "SELECT prompt_content, classifier_domain, classifier_complexity FROM requests "
         "WHERE prompt_content IS NOT NULL AND classifier_domain IS NOT NULL "
         "AND classifier_complexity IS NOT NULL "
+        "AND ts > ? "
         "AND (classifier_used IS NULL OR ("
         "  classifier_used NOT LIKE '%embed-head%' "
         "  AND classifier_used NOT IN ('cache', 'inherited')"
         ")) "
         "ORDER BY id DESC LIMIT ?",
-        (limit,),
+        (since or "", limit),
     ).fetchall()
 
 
-def classifier_traffic_mix(conn: sqlite3.Connection, limit: int) -> dict[str, int]:
-    """How the last `limit` classified requests were labeled.
+def classifier_traffic_mix(
+    conn: sqlite3.Connection, limit: int, since: str | None = None,
+) -> dict[str, int]:
+    """How the last `limit` classified ROUTED requests were labeled.
 
     head   — embedding head answered (confident region)
     llm    — LLM classifier answered (head deferral, or mode='llm')
     reused — routing caches ('cache'/'inherited'); downstream of an earlier decision
+
+    Excludes saint-explain rows (diagnostics and dataset seeding, not traffic).
+    `since` (ISO-8601 UTC, typically the head's trained_at) restricts the window to
+    traffic the current head actually served — otherwise old seeding batches dominate.
     """
     rows = conn.execute(
         "SELECT classifier_used FROM ("
         "  SELECT id, classifier_used FROM requests"
-        "  WHERE classifier_used IS NOT NULL ORDER BY id DESC LIMIT ?)",
-        (limit,),
+        "  WHERE classifier_used IS NOT NULL"
+        "    AND model_field != 'saint-explain'"
+        "    AND ts > ?"
+        "  ORDER BY id DESC LIMIT ?)",
+        (since or "", limit),
     ).fetchall()
     mix = {"head": 0, "llm": 0, "reused": 0}
     for (used,) in rows:
