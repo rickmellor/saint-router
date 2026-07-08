@@ -62,6 +62,9 @@ class ClassifierConfig:
     embedding_backend: str | None = None  # backend serving /v1/embeddings (e.g. nomic-embed via johnny)
     head_path: str | None = None          # trained head .npz (default: ~/.config/saint/classifier_head.npz)
     min_confidence: float = 0.6           # below this the embedding head defers to the LLM classifier
+    ignore_after: tuple[str, ...] = ()    # truncate CLASSIFIER input at the first of these markers
+                                          # (client-injected context, e.g. agent memory recall);
+                                          # dispatch always forwards the full message untouched
 
 
 @dataclass(frozen=True)
@@ -249,6 +252,7 @@ def load_config(path: Path) -> Config:
         embedding_backend=cls_raw.get("embedding_backend"),
         head_path=_expand(cls_raw["head_path"]) if cls_raw.get("head_path") else None,
         min_confidence=float(cls_raw.get("min_confidence", 0.6)),
+        ignore_after=tuple(cls_raw.get("ignore_after", ())),
     )
 
     routing_raw = raw["routing"]

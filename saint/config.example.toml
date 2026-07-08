@@ -92,6 +92,11 @@ min_confidence    = 0.6                 # below this, the head defers to the LLM
 # head_path       = "~/.config/saint/classifier_head.npz"   # trained head (default shown)
 max_input_chars   = 8000                # primary's input cap (head-truncate if no fallback)
 timeout_s         = 10                  # allow headroom for a CPU-served classifier seat
+# Agent clients (hermes, opencode, …) often append memory-recall/context blocks to the
+# user message; classifying that blob instead of the request skews routing. List the
+# markers here to truncate CLASSIFIER input (and the logged prompt) at the first match —
+# dispatch always forwards the full message untouched.
+# ignore_after    = ["\n\n[fabric]", "<memory-context>"]
 
 # ---- Routing -----------------------------------------------------------
 [routing]

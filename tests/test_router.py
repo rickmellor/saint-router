@@ -97,6 +97,41 @@ async def test_decide_auto_runs_classifier():
     assert decision.classifier_result.domain == "code"
 
 
+async def test_decide_ignore_after_cuts_classifier_input_not_dispatch():
+    from dataclasses import replace
+    cfg = _cfg()
+    cfg = replace(cfg, classifier=replace(cfg.classifier,
+                                          ignore_after=("\n\n[fabric]", "<memory-context>")))
+    payload = json.dumps({"domain": "general", "complexity": "trivial", "reason": "greeting"})
+    response = {"choices": [{"message": {"content": payload}}]}
+    injected = "Say hi to the team.\n\n[fabric] relevant to your request:\n  [ts] agent: Verilog modules"
+    mock = AsyncMock(return_value=response)
+    with patch("saint.classifier.call_backend", mock):
+        decision = await decide_route(
+            cfg=cfg, model_field="saint-auto",
+            messages=[{"role": "user", "content": injected}],
+        )
+    # classifier saw only the user's request
+    assert decision.classifier_outcome.input_chars == len("Say hi to the team.")
+    sent = mock.call_args.kwargs["messages"][-1]["content"]
+    assert "[fabric]" not in sent
+    # the logged prompt matches what was classified; dispatch text keeps the full message
+    assert decision.last_user_content_original == "Say hi to the team."
+    assert "[fabric]" in decision.stripped_last_user
+
+
+async def test_decide_ignore_after_injection_only_message_routes_general_trivial():
+    from dataclasses import replace
+    cfg = _cfg()
+    cfg = replace(cfg, classifier=replace(cfg.classifier, ignore_after=("<memory-context>",)))
+    decision = await decide_route(
+        cfg=cfg, model_field="saint-auto",
+        messages=[{"role": "user", "content": "<memory-context>\nrecalled stuff"}],
+    )
+    assert decision.backend == "local-small"  # policy general,trivial — no classifier call
+    assert decision.classifier_result is None
+
+
 async def test_decide_urgency_prefix_changes_policy():
     cfg = _cfg()
     payload = json.dumps({"domain": "general", "complexity": "medium", "reason": "."})

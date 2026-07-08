@@ -128,6 +128,22 @@ def _content_text(content: Any) -> str:
     return ""
 
 
+def _cut_at_markers(text: str, markers: tuple[str, ...]) -> str:
+    """Truncate at the earliest occurrence of any classifier.ignore_after marker.
+
+    Agent clients (hermes, opencode, …) append memory-recall / context blocks to the
+    user message; classifying that blob instead of the user's request skews routing.
+    Only the classifier input (and the logged prompt, so training stays coherent with
+    what the head sees at runtime) is cut — dispatch forwards the full message.
+    """
+    cut = len(text)
+    for m in markers:
+        i = text.find(m)
+        if 0 <= i < cut:
+            cut = i
+    return text[:cut].rstrip()
+
+
 async def decide_route(
     *,
     cfg: Config,
@@ -140,15 +156,21 @@ async def decide_route(
 
     last_user = _last_user_message(messages)
     multimodal = bool(last_user and _is_multimodal_content(last_user.get("content")))
-    last_text_original = _content_text(last_user.get("content")) if last_user else None
+    full_text = _content_text(last_user.get("content")) if last_user else None
+    # classifier + log view of the message: client-injected context cut off.
+    # `full_text` (via parsed.stripped) is what dispatch forwards.
+    last_text_original = (
+        _cut_at_markers(full_text, cfg.classifier.ignore_after)
+        if full_text is not None and cfg.classifier.ignore_after else full_text
+    )
 
     urgencies = {"urgent", "patient", "normal"}
     backend_alias_map = {b.name: set(b.aliases) for b in cfg.backends.values()}
 
     parsed = ParsedPrefixes(urgency=None, pinned_backend=None,
-                             stripped=last_text_original or "", raw="")
-    if last_text_original is not None and not multimodal:
-        parsed = parse_prefixes(last_text_original, urgencies, backend_alias_map)
+                             stripped=full_text or "", raw="")
+    if full_text is not None and not multimodal:
+        parsed = parse_prefixes(full_text, urgencies, backend_alias_map)
 
     pinned_via_model: str | None = None
     if model_field.startswith(SAINT_PREFIX) and model_field not in (SAINT_AUTO, SAINT_EXPLAIN):
@@ -181,7 +203,12 @@ async def decide_route(
             stripped_last_user=parsed.stripped if last_text_original is not None else None,
         )
 
-    if last_user is None or not parsed.stripped.strip():
+    clf_input = (
+        _cut_at_markers(parsed.stripped, cfg.classifier.ignore_after)
+        if cfg.classifier.ignore_after else parsed.stripped
+    )
+
+    if last_user is None or not clf_input.strip():
         backend = resolve_policy(cfg.routing.policy, urgency, "general", "trivial")
         return RoutingDecision(
             request_id=request_id, mode=mode, backend=backend,
@@ -189,10 +216,10 @@ async def decide_route(
             classifier_outcome=None, classifier_result=None,
             multimodal=multimodal, model_field=model_field,
             last_user_content_original=last_text_original,
-            stripped_last_user=parsed.stripped if last_text_original is not None else None,
+            stripped_last_user=parsed.stripped if full_text is not None else None,
         )
 
-    outcome = await _classify_for_route(cfg, parsed.stripped)
+    outcome = await _classify_for_route(cfg, clf_input)
 
     if outcome.result is None:
         backend = cfg.routing.default_on_failure
