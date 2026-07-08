@@ -179,3 +179,76 @@ def test_messages_client_cache_control_passes_through_unmodified(tmp_path):
     kw = acreate.call_args.kwargs
     assert kw["system"] == sys_blocks          # untouched, single breakpoint
     assert kw["messages"] == [{"role": "user", "content": "go"}]  # no injection
+
+
+class _FakeByteStream:
+    """Async iterator of Anthropic SSE bytes (litellm acreate stream=True shape)."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+
+_SSE_CHUNKS = [
+    b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+    b'{"input_tokens":5000,"cache_creation_input_tokens":300,'
+    b'"cache_read_input_tokens":4200,"output_tokens":1}}}\n\n',
+    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+    b'"delta":{"type":"text_delta","text":"hel"}}\n\n',
+    b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":42}}\n\n',
+    b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+]
+
+
+def test_messages_streaming_relays_bytes_and_logs_usage(tmp_path):
+    app, client = _app(tmp_path)
+    with patch("saint.backends.litellm.anthropic.messages.acreate",
+               AsyncMock(return_value=_FakeByteStream(_SSE_CHUNKS))):
+        with client.stream("POST", "/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 100, "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        }) as resp:
+            headers = dict(resp.headers)
+            raw = b"".join(resp.iter_bytes())
+    assert raw == b"".join(_SSE_CHUNKS)     # byte-identical relay
+    assert headers["x-saint-backend"] == "cloud-large"
+    row = _row(tmp_path, "SELECT tokens_in, tokens_out, cache_read_tokens, "
+                         "cache_write_tokens, success FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == (5000, 42, 4200, 300, 1)
+
+
+def test_messages_streaming_failover_before_first_chunk(tmp_path):
+    cfg = _cfg()
+    backends = dict(cfg.backends)
+    backends["cloud-large"] = replace(backends["cloud-large"], on_error="local-small")
+    cfg = replace(cfg, backends=backends)
+    app, client = _app(tmp_path, cfg)
+    with patch("saint.backends.litellm.anthropic.messages.acreate",
+               AsyncMock(side_effect=[RuntimeError("boom"), RuntimeError("boom"),
+                                      _FakeByteStream(_SSE_CHUNKS)])):
+        with client.stream("POST", "/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 100, "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        }) as resp:
+            headers = dict(resp.headers)
+            raw = b"".join(resp.iter_bytes())
+    assert b"message_stop" in raw
+    assert headers["x-saint-backend"] == "local-small"
+    assert headers["x-saint-decided"] == "cloud-large"
+
+
+def test_sse_tracker_tolerates_garbage():
+    from saint.anthropic_api import SseUsageTracker
+    t = SseUsageTracker()
+    t.feed(b"event: message_start\ndata: {not json}\n\n")
+    t.feed(b"random bytes without structure")
+    t.feed(b'event: message_delta\ndata: {"type":"message_delta","usage":'
+           b'{"output_tokens":7}}\n\n')
+    assert t.usage == {"output_tokens": 7}

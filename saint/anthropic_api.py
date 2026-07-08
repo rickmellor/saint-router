@@ -158,6 +158,51 @@ def anthropic_usage(response: Any) -> dict:
     return {}
 
 
+class SseUsageTracker:
+    """Extract usage from an Anthropic SSE stream while relaying bytes untouched.
+
+    Anthropic streams carry usage in two events:
+      - message_start: data.message.usage — input_tokens, cache_creation_input_tokens,
+        cache_read_input_tokens (and an initial output_tokens)
+      - message_delta: data.usage.output_tokens — cumulative; take the max
+    Parsing failures must never kill the relay — this is accounting, not correctness."""
+
+    def __init__(self):
+        self.usage: dict[str, int] = {}
+        self._buf = b""
+
+    def feed(self, chunk: Any) -> None:
+        try:
+            self._buf += chunk if isinstance(chunk, bytes) else str(chunk).encode()
+            while b"\n\n" in self._buf:
+                block, self._buf = self._buf.split(b"\n\n", 1)
+                self._parse(block)
+        except Exception:
+            pass
+
+    def _bump(self, key: str, value: Any) -> None:
+        if isinstance(value, int):
+            self.usage[key] = max(self.usage.get(key, 0), value)
+
+    def _parse(self, block: bytes) -> None:
+        import json as _json
+        for line in block.split(b"\n"):
+            if not line.startswith(b"data:"):
+                continue
+            try:
+                d = _json.loads(line[5:].strip())
+            except Exception:
+                continue
+            t = d.get("type")
+            if t == "message_start":
+                u = (d.get("message") or {}).get("usage") or {}
+                for k in ("input_tokens", "cache_creation_input_tokens",
+                          "cache_read_input_tokens", "output_tokens"):
+                    self._bump(k, u.get(k))
+            elif t == "message_delta":
+                self._bump("output_tokens", (d.get("usage") or {}).get("output_tokens"))
+
+
 def anthropic_error(status: int, err_type: str, message: str):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=status, content={

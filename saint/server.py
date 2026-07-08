@@ -490,8 +490,79 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         started = time.monotonic()
 
+        if stream:
+            from fastapi.responses import StreamingResponse
+
+            from saint.anthropic_api import SseUsageTracker
+
+            async def _attempt_stream(eff_c):
+                upstream_c = await call_backend_messages(eff_c.backend, params=params,
+                                                         stream=True)
+                it = upstream_c.__aiter__()
+                try:
+                    first = await it.__anext__()
+                except StopAsyncIteration:
+                    first = None
+                return it, first
+
+            result, error_kind, last_eff = await run_candidates(
+                cfg=cfg, candidates=candidates, rid=rid,
+                resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
+                bedrock_state=app.state.bedrock_state,
+            )
+            if result is None:
+                _log_messages_row(served=None, eff=last_eff,
+                                  latency_ms=int((time.monotonic() - started) * 1000),
+                                  success=False, error_kind=error_kind, usage={},
+                                  backend_override=None)
+                return anthropic_error(502, "api_error", f"backend error: {error_kind}")
+
+            upstream, first_chunk = result.value
+            first_chunk_ts = time.monotonic() if first_chunk is not None else None
+
+            async def gen():
+                tracker = SseUsageTracker()
+                success_local = False
+                error_kind_local: str | None = None
+                try:
+                    if first_chunk is not None:
+                        tracker.feed(first_chunk)
+                        yield first_chunk
+                        async for chunk in upstream:
+                            tracker.feed(chunk)
+                            yield chunk  # relay ORIGINAL bytes untouched
+                    success_local = True
+                except Exception as e:
+                    success_local = False
+                    error_kind_local = type(e).__name__
+                    import json as _json
+                    err = {"type": "error",
+                           "error": {"type": "api_error", "message": str(e)}}
+                    yield f"event: error\ndata: {_json.dumps(err)}\n\n".encode()
+                finally:
+                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                    ttft = (int((first_chunk_ts - started) * 1000)
+                            if first_chunk_ts else None)
+                    _log_messages_row(served=result.backend, eff=result.eff,
+                                      latency_ms=elapsed_ms, success=success_local,
+                                      error_kind=error_kind_local, usage=tracker.usage,
+                                      backend_override=result.backend)
+                    _provide_telemetry_for(result.eff, elapsed_ms, ttft,
+                                           tracker.usage.get("input_tokens"),
+                                           tracker.usage.get("output_tokens"),
+                                           success_local)
+                    _emit_summary(decision, client_model or "anthropic-messages",
+                                  elapsed_ms,
+                                  cache_read=tracker.usage.get("cache_read_input_tokens"),
+                                  cache_write=tracker.usage.get("cache_creation_input_tokens"),
+                                  served=result.backend)
+
+            return StreamingResponse(
+                gen(), media_type="text/event-stream",
+                headers=_route_headers(decision, result.backend, result.eff))
+
         async def _attempt(eff_c):
-            return await call_backend_messages(eff_c.backend, params=params, stream=stream)
+            return await call_backend_messages(eff_c.backend, params=params, stream=False)
 
         result, error_kind, last_eff = await run_candidates(
             cfg=cfg, candidates=candidates, rid=rid,
