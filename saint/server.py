@@ -16,6 +16,7 @@ from saint.johnny import build_resolver, provide_telemetry
 from saint.prefixes import UnknownPrefixError
 from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
 from saint.backends import call_embeddings
+from saint.dispatch import dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
 from saint.storage import LogRow, build_log_row, log_request, open_db
 
@@ -173,16 +174,6 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
     return h
 
 
-def _dispatch_candidates(cfg: Config, primary: str, breaker) -> list[str]:
-    """Primary plus its one-hop on_error fallback. The fallback's own on_error is never
-    followed (loop-proof). An open breaker skips the primary when a fallback exists."""
-    fb = cfg.backends[primary].on_error
-    candidates = [primary] + ([fb] if fb and fb != primary else [])
-    if len(candidates) > 1 and breaker.is_open(primary):
-        print(f"[router] breaker open on '{primary}' — dispatching straight to '{fb}'",
-              flush=True)
-        return candidates[1:]
-    return candidates
 
 
 def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
@@ -244,7 +235,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             return _explain_response(text, model_field)
 
         breaker = app.state.breaker
-        candidates = _dispatch_candidates(cfg, decision.backend, breaker)
+        candidates = dispatch_candidates(cfg, decision.backend, breaker)
 
         def _provide(eff, latency_ms, ttft_ms, tokens_in, tokens_out, success):
             # Provide telemetry only when the johnny seat actually served the request.
@@ -265,42 +256,30 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
             from saint.router import dispatch_streaming
 
-            # Acquire the stream + first chunk inside the candidate loop: failover is only
-            # possible BEFORE anything is flushed to the client. Mid-stream errors keep the
-            # existing in-stream error-chunk behavior.
+            # Acquire the stream + first chunk inside the attempt: failover is only
+            # possible BEFORE anything is flushed to the client. Mid-stream errors keep
+            # the existing in-stream error-chunk behavior.
             started = time.monotonic()
-            upstream = first_chunk = None
-            eff = served = None
-            error_kind: str | None = None
-            for cand in candidates:
-                eff = resolve_for_dispatch(cfg, cand, app.state.resolver)
-                attempts = 2 if cfg.routing.retry_same_backend else 1
-                for _ in range(attempts):
-                    try:
-                        upstream = await dispatch_streaming(
-                            cfg, decision, messages,
-                            tools=tools, tool_choice=tool_choice,
-                            extra_params=extra or None,
-                            effective_backend=eff.backend,
-                        )
-                        try:
-                            first_chunk = await upstream.__anext__()
-                        except StopAsyncIteration:
-                            first_chunk = None  # empty-but-successful stream
-                        breaker.record_success(cand)
-                        served = cand
-                        break
-                    except Exception as e:
-                        error_kind = type(e).__name__
-                        breaker.record_failure(cand)
-                        print(f"[router] req#{rid}: dispatch to '{cand}' failed "
-                              f"({error_kind}) — {'retrying' if _ == 0 and attempts == 2 else 'moving on'}",
-                              file=sys.stderr, flush=True)
-                        upstream = None
-                if served is not None:
-                    break
 
-            if served is None:
+            async def _attempt_stream(eff_c):
+                upstream_c = await dispatch_streaming(
+                    cfg, decision, messages,
+                    tools=tools, tool_choice=tool_choice,
+                    extra_params=extra or None,
+                    effective_backend=eff_c.backend,
+                )
+                try:
+                    first = await upstream_c.__anext__()
+                except StopAsyncIteration:
+                    first = None  # empty-but-successful stream
+                return upstream_c, first
+
+            result, error_kind, _ = await run_candidates(
+                cfg=cfg, candidates=candidates, rid=rid,
+                resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
+            )
+
+            if result is None:
                 _safe_log(app.state.db, build_log_row(
                     decision=decision, model_field=model_field,
                     backend_latency_ms=int((time.monotonic() - started) * 1000),
@@ -310,8 +289,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 ))
                 raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
 
+            upstream, first_chunk = result.value
             first_chunk_ts = time.monotonic() if first_chunk is not None else None
-            eff_final, served_final = eff, served
+            eff_final, served_final = result.eff, result.backend
 
             async def gen():
                 tokens_in_total = 0
@@ -378,30 +358,21 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                      headers=_route_headers(decision, served_final, eff_final))
 
         started = time.monotonic()
-        response = None
-        eff = served = None
-        error_kind: str | None = None
-        for cand in candidates:
-            eff = resolve_for_dispatch(cfg, cand, app.state.resolver)
-            attempts = 2 if cfg.routing.retry_same_backend else 1
-            for _ in range(attempts):
-                try:
-                    response = await dispatch_non_streaming(
-                        cfg, decision, messages, tools=tools, tool_choice=tool_choice,
-                        extra_params=extra or None, effective_backend=eff.backend,
-                    )
-                    breaker.record_success(cand)
-                    served = cand
-                    break
-                except Exception as e:
-                    error_kind = type(e).__name__
-                    breaker.record_failure(cand)
-                    print(f"[router] req#{rid}: dispatch to '{cand}' failed "
-                          f"({error_kind}) — {'retrying' if _ == 0 and attempts == 2 else 'moving on'}",
-                          file=sys.stderr, flush=True)
-            if served is not None:
-                break
-        success = served is not None
+
+        async def _attempt(eff_c):
+            return await dispatch_non_streaming(
+                cfg, decision, messages, tools=tools, tool_choice=tool_choice,
+                extra_params=extra or None, effective_backend=eff_c.backend,
+            )
+
+        result, error_kind, last_eff = await run_candidates(
+            cfg=cfg, candidates=candidates, rid=rid,
+            resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
+        )
+        success = result is not None
+        served = result.backend if result else None
+        eff = result.eff if result else last_eff
+        response = result.value if result else None
 
         backend_latency_ms = int((time.monotonic() - started) * 1000)
 
