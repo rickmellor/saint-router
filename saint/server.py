@@ -82,9 +82,13 @@ def _cache_tokens(usage: dict) -> tuple[int | None, int | None]:
     read = usage.get("cache_read_input_tokens")
     if read is None:
         read = ptd.get("cached_tokens")
+    if read is None:
+        read = usage.get("cacheReadInputTokens")  # Bedrock Converse naming
     write = usage.get("cache_creation_input_tokens")
     if write is None:
         write = ptd.get("cache_creation_tokens")
+    if write is None:
+        write = usage.get("cacheWriteInputTokens")  # Bedrock Converse naming
     return read, write
 
 

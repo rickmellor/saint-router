@@ -275,7 +275,7 @@ def _effective_prices(b) -> dict | None:
     1.25x write of price_in). None when no price_in is set (cost columns stay blank)."""
     if b.price_in is None:
         return None
-    is_anthropic = b.provider == "anthropic"
+    is_anthropic = b.provider in ("anthropic", "bedrock")  # Bedrock Claude cache pricing matches
     return {
         "in": b.price_in,
         "out": b.price_out if b.price_out is not None else 0.0,

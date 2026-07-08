@@ -323,7 +323,9 @@ def _prepare_dispatch(
     out_messages = apply_stripping(messages, decision.stripped_last_user)
     backend = effective_backend or cfg.backends[decision.backend]
     out_tools = tools
-    if cfg.cache.anthropic_prompt_caching and backend.provider == "anthropic":
+    # Bedrock Claude models support the same cache_control blocks (Probe C on the corp
+    # box verifies forwarding + usage field names before this ships in anger).
+    if cfg.cache.anthropic_prompt_caching and backend.provider in ("anthropic", "bedrock"):
         out_messages, out_tools = inject_cache_control(
             out_messages, tools,
             min_chars=cfg.cache.prompt_cache_min_chars,
