@@ -54,12 +54,32 @@ timeout_s    = 180
 johnny_role  = "coder"
 # while_loading = "cloud-small"               # per-backend warm-up target (else [routing].while_loading)
 
+# ---- Embedding backend (optional) --------------------------------------
+# A local embeddings endpoint (e.g. nomic-embed served by johnny on CPU). Only needed
+# for classifier.mode = "embedding". provider/model still required for config validity.
+[backends.local-embed]
+provider  = "openai"
+base_url  = "http://localhost:8001/v1"        # your /v1/embeddings endpoint
+model     = "nomic-embed-text-v1.5"
+api_key   = "x"
+timeout_s = 10
+
 # ---- Classifier --------------------------------------------------------
 [classifier]
-backend          = "local-small"      # which backend runs the classifier
-fallback_backend = "local-large"      # used for oversize input or primary failure (optional)
-max_input_chars  = 8000               # primary's input cap (head-truncate if no fallback)
-timeout_s        = 5
+# mode = "llm" (default): prompt a chat model for (domain, complexity).
+# mode = "embedding": embed the prompt (embedding_backend) + a tiny trained head — ~50-100x
+#   faster on CPU, deterministic. It falls back to the LLM classifier (backend below) when
+#   the head is untrained or below min_confidence, so `backend` is still required.
+#   Train it with `saint classifier train` after some traffic in mode="llm" with
+#   logging.prompt_storage = "full" (it distills the LLM's own labels).
+mode              = "llm"
+backend           = "local-small"      # the LLM classifier (and the embedding-mode fallback)
+fallback_backend  = "local-large"      # used for oversize input or primary failure (optional)
+embedding_backend = "local-embed"      # required when mode = "embedding"
+min_confidence    = 0.6                 # below this, the head defers to the LLM classifier
+# head_path       = "~/.config/saint/classifier_head.npz"   # trained head (default shown)
+max_input_chars   = 8000               # primary's input cap (head-truncate if no fallback)
+timeout_s         = 5
 # prompt_template_path = "~/.config/saint/classifier.prompt"   # optional override
 
 # ---- Routing -----------------------------------------------------------

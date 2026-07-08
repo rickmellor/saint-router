@@ -133,10 +133,15 @@ def config_show(config: Path | None = typer.Option(None, help="Path to config.to
             cloud_providers.add(b.provider)
 
     print("[classifier]")
-    print(f"  backend          = {cfg.classifier.backend}")
-    print(f"  fallback_backend = {cfg.classifier.fallback_backend}")
-    print(f"  max_input_chars  = {cfg.classifier.max_input_chars}")
-    print(f"  timeout_s        = {cfg.classifier.timeout_s}")
+    print(f"  mode              = {cfg.classifier.mode}")
+    print(f"  backend           = {cfg.classifier.backend}")
+    print(f"  fallback_backend  = {cfg.classifier.fallback_backend}")
+    if cfg.classifier.mode == "embedding":
+        print(f"  embedding_backend = {cfg.classifier.embedding_backend}")
+        print(f"  min_confidence    = {cfg.classifier.min_confidence}")
+        print(f"  head_path         = {cfg.classifier.head_path or '(default)'}")
+    print(f"  max_input_chars   = {cfg.classifier.max_input_chars}")
+    print(f"  timeout_s         = {cfg.classifier.timeout_s}")
     print()
     print("[logging]")
     print(f"  db_path        = {cfg.logging.db_path}")
@@ -271,6 +276,114 @@ def relabel_by_id_cmd(
     except Exception as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from None
+
+
+classifier_app = typer.Typer(help="Embedding classifier: train / inspect the head.")
+app.add_typer(classifier_app, name="classifier")
+
+
+@classifier_app.command("train")
+def classifier_train(
+    config: Path | None = typer.Option(None, help="Path to config.toml"),
+    limit: int = typer.Option(5000, "--limit", help="Max recent logged rows to train from."),
+    min_samples: int = typer.Option(50, "--min-samples", help="Refuse to train on fewer than this."),
+):
+    """Distill the embedding head from the request log's (prompt → domain/complexity) labels.
+
+    Reads recent requests with stored full prompts + the LLM classifier's own labels (never
+    the head's own — no feedback loop), embeds each prompt via the embedding backend, fits
+    the two logistic-regression heads, and saves to classifier.head_path. Needs
+    logging.prompt_storage = 'full' and some traffic classified in mode='llm' first.
+    """
+    import asyncio
+
+    import numpy as np
+
+    from saint import embed_classifier as EC
+    from saint.storage import open_db
+
+    cfg = _load_or_die(config)
+    eb_name = cfg.classifier.embedding_backend
+    if not eb_name or eb_name not in cfg.backends:
+        typer.secho("classifier.embedding_backend must be set (and defined) to train.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    embed_backend = cfg.backends[eb_name]
+
+    conn = open_db(Path(cfg.logging.db_path))
+    rows = conn.execute(
+        "SELECT prompt_content, classifier_domain, classifier_complexity FROM requests "
+        "WHERE prompt_content IS NOT NULL AND classifier_domain IS NOT NULL "
+        "AND classifier_complexity IS NOT NULL "
+        "AND (classifier_used IS NULL OR classifier_used NOT LIKE '%embed-head%') "
+        "ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    seen: set[str] = set()
+    prompts: list[str] = []
+    doms: list[str] = []
+    cplxs: list[str] = []
+    for content, dom, cplx in rows:
+        if content in seen:  # dedupe; rows are DESC so we keep the most recent label
+            continue
+        seen.add(content)
+        prompts.append(content)
+        doms.append(dom)
+        cplxs.append(cplx)
+    if len(prompts) < min_samples:
+        typer.secho(f"only {len(prompts)} usable rows (need ≥{min_samples}). Run more traffic in "
+                    "mode='llm' with logging.prompt_storage='full' first.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"embedding {len(prompts)} prompts via '{eb_name}'…")
+
+    async def _embed_all() -> "np.ndarray":
+        chunks = []
+        batch = 64
+        for i in range(0, len(prompts), batch):
+            chunks.append(await EC.embed_texts(embed_backend, prompts[i:i + batch]))
+            typer.echo(f"  {min(i + batch, len(prompts))}/{len(prompts)}")
+        return np.vstack(chunks)
+
+    try:
+        X = asyncio.run(_embed_all())
+    except Exception as e:
+        typer.secho(f"embedding failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from None
+
+    head = EC.train_head(X, doms, cplxs, embed_model=str(embed_backend.model))
+    out = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
+    head.save(out)
+    d_ok = sum(head.predict(v)[0] == d for v, d in zip(X, doms))
+    c_ok = sum(head.predict(v)[2] == c for v, c in zip(X, cplxs))
+    typer.secho(f"✓ trained on {len(prompts)} samples → {out}", fg=typer.colors.GREEN)
+    typer.echo(f"  train accuracy: domain {d_ok}/{len(prompts)}  complexity {c_ok}/{len(prompts)}")
+    typer.echo(f"  domain={head.domain_classes}  complexity={head.complexity_classes}")
+    typer.echo("  set classifier.mode = 'embedding' in your config to use it (falls back to the LLM when unsure).")
+
+
+@classifier_app.command("status")
+def classifier_status(config: Path | None = typer.Option(None, help="Path to config.toml")):
+    """Show the classifier mode and the trained head's metadata (if any)."""
+    from saint import embed_classifier as EC
+
+    cfg = _load_or_die(config)
+    path = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
+    print(f"mode              = {cfg.classifier.mode}")
+    print(f"embedding_backend = {cfg.classifier.embedding_backend}")
+    print(f"min_confidence    = {cfg.classifier.min_confidence}")
+    print(f"head_path         = {path}")
+    if not path.exists():
+        print("head              = (not trained — run `saint classifier train`)")
+        return
+    h = EC.Head.load(path)
+    print(f"trained_at        = {h.trained_at}")
+    print(f"n_samples         = {h.n_samples}")
+    print(f"embed_model       = {h.embed_model}")
+    print(f"dim               = {h.dim}")
+    print(f"domain_classes    = {h.domain_classes}")
+    print(f"complexity_classes= {h.complexity_classes}")
 
 
 if __name__ == "__main__":

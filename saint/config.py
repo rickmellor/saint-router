@@ -53,11 +53,15 @@ class JohnnyConfig:
 
 @dataclass(frozen=True)
 class ClassifierConfig:
-    backend: str
+    backend: str                          # the LLM classifier (also the fallback in embedding mode)
     fallback_backend: str | None
     max_input_chars: int
     timeout_s: int
     prompt_template_path: str | None
+    mode: str = "llm"                     # "llm" | "embedding"
+    embedding_backend: str | None = None  # backend serving /v1/embeddings (e.g. nomic-embed via johnny)
+    head_path: str | None = None          # trained head .npz (default: ~/.config/saint/classifier_head.npz)
+    min_confidence: float = 0.6           # below this the embedding head defers to the LLM classifier
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,14 @@ def _validate(cfg: Config) -> list[str]:
         errors.append(
             f"classifier.fallback_backend '{fb}' is not defined in [backends]"
         )
+    if cfg.classifier.mode not in ("llm", "embedding"):
+        errors.append(f"classifier.mode '{cfg.classifier.mode}' must be 'llm' or 'embedding'")
+    if cfg.classifier.mode == "embedding":
+        eb = cfg.classifier.embedding_backend
+        if not eb:
+            errors.append("classifier.embedding_backend is required when classifier.mode = 'embedding'")
+        elif eb not in backend_names:
+            errors.append(f"classifier.embedding_backend '{eb}' is not defined in [backends]")
     if cfg.routing.default_on_failure not in backend_names:
         errors.append(
             f"routing.default_on_failure '{cfg.routing.default_on_failure}'"
@@ -233,6 +245,10 @@ def load_config(path: Path) -> Config:
             _expand(cls_raw["prompt_template_path"])
             if cls_raw.get("prompt_template_path") else None
         ),
+        mode=cls_raw.get("mode", "llm"),
+        embedding_backend=cls_raw.get("embedding_backend"),
+        head_path=_expand(cls_raw["head_path"]) if cls_raw.get("head_path") else None,
+        min_confidence=float(cls_raw.get("min_confidence", 0.6)),
     )
 
     routing_raw = raw["routing"]
