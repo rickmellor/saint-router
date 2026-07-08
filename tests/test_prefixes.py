@@ -83,3 +83,43 @@ def test_bang_inside_message_after_prefix_not_reparsed():
     assert out.urgency == "urgent"
     assert out.pinned_backend is None
     assert out.stripped == "run !opus thing"
+
+
+def test_at_sigil_urgency():
+    out = parse_prefixes("@patient review this code", URGENCIES, BACKENDS)
+    assert out.urgency == "patient"
+    assert out.stripped == "review this code"
+    assert out.raw == "@patient"
+
+
+def test_at_sigil_backend_alias():
+    out = parse_prefixes("@coder fix the loop", URGENCIES, BACKENDS)
+    assert out.pinned_backend == "local-coder"
+    assert out.stripped == "fix the loop"
+
+
+def test_at_sigil_unknown_token_is_plain_text():
+    # '@rick check this' is a mention, not a typo'd prefix — must not raise
+    out = parse_prefixes("@rick check this", URGENCIES, BACKENDS)
+    assert out.urgency is None and out.pinned_backend is None
+    assert out.stripped == "@rick check this"
+    assert out.raw == ""
+
+
+def test_mixed_sigils():
+    out = parse_prefixes("!urgent @coder do this", URGENCIES, BACKENDS)
+    assert out.urgency == "urgent"
+    assert out.pinned_backend == "local-coder"
+    assert out.stripped == "do this"
+    assert out.raw == "!urgent @coder"
+
+
+def test_prefix_then_unknown_at_token_stays_in_message():
+    out = parse_prefixes("@patient @rick take a look", URGENCIES, BACKENDS)
+    assert out.urgency == "patient"
+    assert out.stripped == "@rick take a look"
+
+
+def test_bang_unknown_token_still_raises():
+    with pytest.raises(UnknownPrefixError):
+        parse_prefixes("!patinet oops", URGENCIES, BACKENDS)

@@ -6,7 +6,9 @@ port = 4000
 
 # ---- Backends ----------------------------------------------------------
 # Names are arbitrary identifiers. `aliases` give short names you can use
-# as !-prefixes (e.g. "!opus") in the latest user message.
+# as prefixes (e.g. "!opus" or "@opus") in the latest user message — same for
+# urgencies ("@patient ..."). Use '@' from terminal agents that steal '!' for
+# their shell escape (pi, opencode); an unknown @token is plain text, not an error.
 # API keys: prefer `api_key_env` (read from the named environment variable) for
 # real keys; local OpenAI-compatible servers (vLLM, llama.cpp) ignore the key,
 # so a literal placeholder like api_key = "local" is fine there.
