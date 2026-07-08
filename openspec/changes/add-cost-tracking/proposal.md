@@ -1,6 +1,13 @@
 # Add cost tracking
 
-> **Status:** deferred. Tracked here so notes and ideas can accumulate before the change is started. Promote to active by filling in `design.md` and `tasks.md` and updating the parent `add-initial-router` proposal's "Out of Scope" entry.
+> **Status:** superseded (2026-07-08) — implemented as `saint log stats` with a different
+> shape than proposed. Prices live per-backend (`price_in`/`price_out`/`price_cache_*`,
+> anthropic cache prices derived 0.1x/1.25x) rather than a `[pricing]` section with bundled
+> defaults; cost is computed at read time from logged token counts (no `cost_usd_*` columns
+> or backfill); cache read/write tokens are logged per request (migration 0003) and priced;
+> and the headline metric goes beyond the proposal: NET savings against an all-cloud
+> counterfactual, decomposed into local routing + cheaper tiers + prompt caching. Budget
+> warnings remain unimplemented. Kept for the ideas not yet built.
 
 ## Intent
 
