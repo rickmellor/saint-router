@@ -44,6 +44,11 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
     if res is None:  # johnny unreachable → degrade to the static baseline (don't reroute)
         print(f"[saint] johnny unreachable resolving '{target}' (backend '{backend_name}') — "
               f"using static baseline", file=sys.stderr)
+        # Unlike loading/absent (a seat is warming up — serve from while_loading meanwhile),
+        # unreachable says nothing about the seat: the profile's fixed port is still the best
+        # guess, so keep the request local instead of rerouting via while_loading (often cloud).
+        if not b.johnny_only and b.base_url and b.model:
+            return Effective(b, "static_baseline", None)
         return _fallback(cfg, b, None)
 
     if res.state == "ready" and res.endpoint and res.model:

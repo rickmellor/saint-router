@@ -133,6 +133,16 @@ def test_unreachable_falls_to_static_baseline_when_no_while_loading(tmp_path: Pa
     assert eff.state_at_dispatch == "static_baseline"
 
 
+def test_unreachable_prefers_static_baseline_over_while_loading(tmp_path: Path):
+    # Unreachable != loading: the profile's fixed port is still the best guess, so a
+    # johnny outage must not reroute local traffic to while_loading (often a cloud backend).
+    cfg = load_config(_write_config(tmp_path))  # while_loading = cloud-small configured
+    stub = _Stub(None)  # johnny unreachable
+    eff = resolve_for_dispatch(cfg, "local-coder", stub)
+    assert eff.backend.name == "local-coder"
+    assert eff.state_at_dispatch == "static_baseline"
+
+
 def test_johnny_only_no_static_floor_uses_default(tmp_path: Path):
     cfg = load_config(_write_config(tmp_path, while_loading=False))
     stub = _Stub(Resolution(None, None, None, "absent", None, None))
