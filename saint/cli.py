@@ -408,9 +408,28 @@ def classifier_train(
 
 
 @classifier_app.command("status")
-def classifier_status(config: Path | None = typer.Option(None, help="Path to config.toml")):
-    """Show the classifier mode and the trained head's metadata (if any)."""
+def classifier_status(
+    config: Path | None = typer.Option(None, help="Path to config.toml"),
+    drift: bool = typer.Option(
+        False, "--drift",
+        help="Replay the head against recent LLM-labeled rows (embeds them; a few seconds).",
+    ),
+    limit: int = typer.Option(200, "--limit", help="Max rows for the --drift comparison."),
+):
+    """Show classifier mode, head metadata, live coverage, and (--drift) boundary drift.
+
+    Coverage: how recent traffic split between the head, LLM deferrals, and cache reuse.
+    Drift: head predictions vs the LLM's labels on recent deferred rows — the boundary
+    region where the head declined. Low routing agreement there, or lots of new labeled
+    rows since training, means a retrain is worth it.
+    """
     from saint import embed_classifier as EC
+    from saint.storage import (
+        classifier_traffic_mix,
+        count_training_rows_since,
+        fetch_training_rows,
+        open_db,
+    )
 
     cfg = _load_or_die(config)
     path = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
@@ -418,16 +437,106 @@ def classifier_status(config: Path | None = typer.Option(None, help="Path to con
     print(f"embedding_backend = {cfg.classifier.embedding_backend}")
     print(f"min_confidence    = {cfg.classifier.min_confidence}")
     print(f"head_path         = {path}")
-    if not path.exists():
+    head = None
+    if path.exists():
+        head = EC.Head.load(path)
+        print(f"trained_at        = {head.trained_at}")
+        print(f"n_samples         = {head.n_samples}")
+        print(f"embed_model       = {head.embed_model}")
+        print(f"dim               = {head.dim}")
+        print(f"domain_classes    = {head.domain_classes}")
+        print(f"complexity_classes= {head.complexity_classes}")
+    else:
         print("head              = (not trained — run `saint classifier train`)")
-        return
-    h = EC.Head.load(path)
-    print(f"trained_at        = {h.trained_at}")
-    print(f"n_samples         = {h.n_samples}")
-    print(f"embed_model       = {h.embed_model}")
-    print(f"dim               = {h.dim}")
-    print(f"domain_classes    = {h.domain_classes}")
-    print(f"complexity_classes= {h.complexity_classes}")
+
+    conn = open_db(Path(cfg.logging.db_path))
+    mix = classifier_traffic_mix(conn, 500)
+    classified = mix["head"] + mix["llm"]
+    print()
+    print(f"recent traffic (last {sum(mix.values())} classified rows):")
+    print(f"  head answered   = {mix['head']}")
+    print(f"  llm answered    = {mix['llm']}"
+          + ("  (head deferrals)" if cfg.classifier.mode == "embedding" else ""))
+    print(f"  cache/inherited = {mix['reused']}")
+    if classified:
+        coverage = mix["head"] / classified
+        print(f"  head coverage   = {100 * coverage:.0f}% of fresh classifications")
+    new_rows = count_training_rows_since(conn, head.trained_at) if head else None
+    if new_rows is not None:
+        print(f"  new labeled rows since training = {new_rows}")
+
+    suggestions: list[str] = []
+    if head is None:
+        suggestions.append("no head trained — run `saint classifier train`")
+    elif classified and mix["head"] / classified < 0.5 and (new_rows or 0) >= 100:
+        suggestions.append(
+            f"head coverage {100 * mix['head'] / classified:.0f}% with {new_rows} new "
+            "labeled rows banked — retrain to grow the confident region"
+        )
+
+    if drift and head is not None:
+        eb_name = cfg.classifier.embedding_backend
+        if not eb_name or eb_name not in cfg.backends:
+            _emit_err("classifier.embedding_backend must be set for --drift")
+            raise typer.Exit(2)
+        import asyncio
+
+        from saint.policy import resolve_policy
+
+        # Deferred/LLM-labeled rows are exactly the trainer's input: the head declined
+        # these (or mode was 'llm'), and the LLM's labels are the reference.
+        raw = fetch_training_rows(conn, limit=limit * 3)
+        seen: set[str] = set()
+        rows = []
+        for prompt, dom, cplx in raw:
+            if prompt in seen:
+                continue
+            seen.add(prompt)
+            rows.append((prompt, dom, cplx))
+            if len(rows) >= limit:
+                break
+        if not rows:
+            print("\ndrift: no LLM-labeled rows to compare against")
+        else:
+            prompts = [r[0] for r in rows]
+            print(f"\ndrift check: replaying head over {len(rows)} recent LLM-labeled rows…")
+
+            async def _embed():
+                chunks = []
+                for i in range(0, len(prompts), 64):
+                    chunks.append(await EC.embed_texts(cfg.backends[eb_name], prompts[i:i + 64]))
+                import numpy as np
+                return np.vstack(chunks)
+
+            X = asyncio.run(_embed())
+            dom_hit = cplx_hit = route_hit = confident = 0
+            for k, (_, dom, cplx) in enumerate(rows):
+                dl, dc, cl, cc = head.predict(X[k])
+                dom_hit += dl == dom
+                cplx_hit += cl == cplx
+                confident += min(dc, cc) >= cfg.classifier.min_confidence
+                want = resolve_policy(cfg.routing.policy, "normal", dom, cplx)
+                got = resolve_policy(cfg.routing.policy, "normal", dl, cl)
+                route_hit += want == got
+            n = len(rows)
+            print(f"  domain agreement     = {dom_hit}/{n} ({100 * dom_hit / n:.0f}%)")
+            print(f"  complexity agreement = {cplx_hit}/{n} ({100 * cplx_hit / n:.0f}%)")
+            print(f"  routing agreement    = {route_hit}/{n} ({100 * route_hit / n:.0f}%)"
+                  "  (policy.normal destinations)")
+            print(f"  head now confident on {confident}/{n} ({100 * confident / n:.0f}%) "
+                  "of these (they deferred when served)")
+            if route_hit / n < 0.9:
+                suggestions.append(
+                    f"boundary drift: head disagrees with the LLM's routing on "
+                    f"{n - route_hit}/{n} recent deferrals — retrain"
+                )
+
+    print()
+    if suggestions:
+        for s in suggestions:
+            typer.secho(f"⚠ {s}", fg=typer.colors.YELLOW)
+    else:
+        typer.secho("✓ no retrain needed by current heuristics", fg=typer.colors.GREEN)
 
 
 if __name__ == "__main__":

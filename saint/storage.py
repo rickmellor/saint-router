@@ -173,6 +173,45 @@ def fetch_training_rows(conn: sqlite3.Connection, limit: int) -> list[tuple]:
     ).fetchall()
 
 
+def classifier_traffic_mix(conn: sqlite3.Connection, limit: int) -> dict[str, int]:
+    """How the last `limit` classified requests were labeled.
+
+    head   — embedding head answered (confident region)
+    llm    — LLM classifier answered (head deferral, or mode='llm')
+    reused — routing caches ('cache'/'inherited'); downstream of an earlier decision
+    """
+    rows = conn.execute(
+        "SELECT classifier_used FROM ("
+        "  SELECT id, classifier_used FROM requests"
+        "  WHERE classifier_used IS NOT NULL ORDER BY id DESC LIMIT ?)",
+        (limit,),
+    ).fetchall()
+    mix = {"head": 0, "llm": 0, "reused": 0}
+    for (used,) in rows:
+        if "embed-head" in used:
+            mix["head"] += 1
+        elif used in ("cache", "inherited"):
+            mix["reused"] += 1
+        else:
+            mix["llm"] += 1
+    return mix
+
+
+def count_training_rows_since(conn: sqlite3.Connection, ts: str) -> int:
+    """Distinct usable training prompts logged after `ts` (ISO-8601 UTC — the head's
+    trained_at). 'How much would a retrain add?'"""
+    return conn.execute(
+        "SELECT COUNT(DISTINCT prompt_content) FROM requests "
+        "WHERE prompt_content IS NOT NULL AND classifier_domain IS NOT NULL "
+        "AND classifier_complexity IS NOT NULL "
+        "AND (classifier_used IS NULL OR ("
+        "  classifier_used NOT LIKE '%embed-head%' "
+        "  AND classifier_used NOT IN ('cache', 'inherited')"
+        ")) AND ts > ?",
+        (ts,),
+    ).fetchone()[0]
+
+
 def clear_requests(conn: sqlite3.Connection) -> int:
     """Delete every request log row and restart ids at 1. Returns rows deleted.
 

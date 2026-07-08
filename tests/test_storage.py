@@ -201,3 +201,27 @@ def test_fetch_training_rows_excludes_reused_labels(tmp_path):
     rows = fetch_training_rows(conn, limit=100)
     prompts = [r[0] for r in rows]
     assert prompts == ["please refactor this"]  # only the LLM-labeled row
+
+
+def test_classifier_traffic_mix_buckets(tmp_path):
+    from saint.storage import classifier_traffic_mix
+    conn = open_db(tmp_path / "log.sqlite")
+    for used in ("local-embed (embed-head)", "local-embed (embed-head)", "local-chat",
+                 "cache", "inherited"):
+        log_request(conn, _row(classifier_used=used))
+    log_request(conn, _row(classifier_used=None))  # unclassified (pinned) — excluded
+    mix = classifier_traffic_mix(conn, limit=100)
+    assert mix == {"head": 2, "llm": 1, "reused": 2}
+
+
+def test_count_training_rows_since(tmp_path):
+    from saint.storage import count_training_rows_since
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(classifier_used="local-chat", prompt_content="old prompt"))
+    cutoff = "2999-01-01T00:00:00+00:00"
+    assert count_training_rows_since(conn, cutoff) == 0
+    assert count_training_rows_since(conn, "2000-01-01T00:00:00+00:00") == 1
+    # reused/head-labeled rows never count
+    log_request(conn, _row(classifier_used="cache", prompt_content="cached prompt"))
+    log_request(conn, _row(classifier_used="local-embed (embed-head)", prompt_content="head prompt"))
+    assert count_training_rows_since(conn, "2000-01-01T00:00:00+00:00") == 1
