@@ -469,6 +469,31 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                                             decision.parsed.raw)
         rid = decision.request_id[:8]
 
+        def _params_for(eff_c):
+            # Signed thinking is HMAC-bound to the minting model; strip on a backend switch.
+            from saint.thinking import should_strip, strip_signed_thinking
+            if should_strip(eff_c.backend.provider or "", decision.prev_backend,
+                            decision.backend):
+                return {**params, "messages": strip_signed_thinking(params["messages"])}
+            return params
+
+        def _refresh_affinity(served: str):
+            # Record the backend that actually minted this turn's thinking, so later
+            # turns (even pinned ones, which decide_route leaves label-less) know the
+            # continuity backend for the thinking-signature guard.
+            caches = app.state.route_caches
+            if not decision.conversation_key or caches.conversations is None:
+                return
+            from saint.route_cache import ConversationEntry
+            entry = caches.conversations.get(decision.conversation_key)
+            if entry is None:
+                caches.conversations.set(decision.conversation_key,
+                                         ConversationEntry(backend=served))
+            elif entry.backend != served:
+                from dataclasses import replace as _replace
+                caches.conversations.set(decision.conversation_key,
+                                         _replace(entry, backend=served))
+
         def _log_state(eff, served: str) -> str | None:
             return "dispatch_fallback" if served != decision.backend else eff.state_at_dispatch
 
@@ -496,7 +521,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             from saint.anthropic_api import SseUsageTracker
 
             async def _attempt_stream(eff_c):
-                upstream_c = await call_backend_messages(eff_c.backend, params=params,
+                upstream_c = await call_backend_messages(eff_c.backend,
+                                                         params=_params_for(eff_c),
                                                          stream=True)
                 it = upstream_c.__aiter__()
                 try:
@@ -543,6 +569,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     elapsed_ms = int((time.monotonic() - started) * 1000)
                     ttft = (int((first_chunk_ts - started) * 1000)
                             if first_chunk_ts else None)
+                    if success_local:
+                        _refresh_affinity(result.backend)
                     _log_messages_row(served=result.backend, eff=result.eff,
                                       latency_ms=elapsed_ms, success=success_local,
                                       error_kind=error_kind_local, usage=tracker.usage,
@@ -562,7 +590,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 headers=_route_headers(decision, result.backend, result.eff))
 
         async def _attempt(eff_c):
-            return await call_backend_messages(eff_c.backend, params=params, stream=False)
+            return await call_backend_messages(eff_c.backend, params=_params_for(eff_c),
+                                               stream=False)
 
         result, error_kind, last_eff = await run_candidates(
             cfg=cfg, candidates=candidates, rid=rid,
@@ -578,6 +607,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
         usage = anthropic_usage(result.value)
+        _refresh_affinity(result.backend)
         _log_messages_row(served=result.backend, eff=result.eff, latency_ms=latency_ms,
                           success=True, error_kind=None, usage=usage,
                           backend_override=result.backend)

@@ -49,8 +49,8 @@ class CachedLabels:
 
 @dataclass(frozen=True)
 class ConversationEntry:
-    labels: CachedLabels
-    backend: str  # last intended backend (observability; policy re-resolves anyway)
+    backend: str                       # backend that served this conversation's last turn
+    labels: CachedLabels | None = None  # None for pinned/multimodal turns (no classification)
 
 
 class TTLCache:

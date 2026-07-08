@@ -252,3 +252,56 @@ def test_sse_tracker_tolerates_garbage():
     t.feed(b'event: message_delta\ndata: {"type":"message_delta","usage":'
            b'{"output_tokens":7}}\n\n')
     assert t.usage == {"output_tokens": 7}
+
+
+_THINKING_HISTORY = [
+    {"role": "user", "content": "design a rate limiter"},
+    {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "considering token bucket", "signature": "sig-abc"},
+        {"type": "text", "text": "Here's a design..."}]},
+    {"role": "user", "content": "now make it distributed"},
+]
+
+
+def test_messages_thinking_stripped_on_backend_switch(tmp_path):
+    # cloud-large has an on_error to local-small, but force a switch via classification:
+    # first turn pins nothing; we simulate a served backend differing from history's minter
+    cfg = _cfg()
+    backends = dict(cfg.backends)
+    # two anthropic-ish backends so a switch stays on a signature-validating provider
+    backends["cloud-small"] = replace(backends["cloud-small"], on_error=None)
+    cfg = replace(cfg, backends=backends)
+    app, client = _app(tmp_path, cfg)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    clf = AsyncMock(return_value=_CLS_RESP)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate), \
+         patch("saint.classifier.call_backend", clf):
+        # turn 1 on cloud-small (pinned) — establishes affinity backend = cloud-small
+        client.post("/v1/messages", json={
+            "model": "saint-cloud-small", "max_tokens": 10, "system": "agent",
+            "messages": [{"role": "user", "content": "design a rate limiter"}]})
+        # turn 2 same conversation, pinned to a DIFFERENT backend, replaying signed thinking
+        client.post("/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 10, "system": "agent",
+            "messages": _THINKING_HISTORY})
+    sent = acreate.call_args.kwargs["messages"]
+    # the signed thinking block must be gone (backend switched cloud-small -> cloud-large)
+    assistant = [m for m in sent if m["role"] == "assistant"][0]
+    assert all(b.get("type") != "thinking" for b in assistant["content"])
+
+
+def test_messages_thinking_kept_when_backend_stable(tmp_path):
+    app, client = _app(tmp_path)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate):
+        # turn 1 pins cloud-large
+        client.post("/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 10, "system": "agent",
+            "messages": [{"role": "user", "content": "design a rate limiter"}]})
+        # turn 2 same backend → thinking preserved
+        client.post("/v1/messages", json={
+            "model": "saint-cloud-large", "max_tokens": 10, "system": "agent",
+            "messages": _THINKING_HISTORY})
+    sent = acreate.call_args.kwargs["messages"]
+    assistant = [m for m in sent if m["role"] == "assistant"][0]
+    assert any(b.get("type") == "thinking" for b in assistant["content"])

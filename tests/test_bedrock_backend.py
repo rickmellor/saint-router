@@ -79,6 +79,7 @@ def test_cache_control_gate_includes_bedrock():
     class _D:  # minimal decision stub for _prepare_dispatch
         stripped_last_user = "go"
         backend = "cloud-large"
+        prev_backend = "cloud-large"  # same backend → no thinking strip
 
     _, out, _ = _prepare_dispatch(cfg, _D(), msgs, None, _bedrock())
     assert out[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
