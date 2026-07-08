@@ -289,22 +289,37 @@ def _effective_prices(b) -> dict | None:
 @log_app.command("stats")
 def log_stats(
     days: float = typer.Option(7.0, "--days", "-d", help="Window in days."),
+    baseline: str | None = typer.Option(
+        None, "--baseline",
+        help="Counterfactual backend for net savings (default: routing.default_on_failure)."),
     config: Path | None = typer.Option(None),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ):
-    """Per-backend usage and cost accounting, including the prompt-cache advantage.
+    """Per-backend usage/cost accounting, cache advantage, and NET savings.
 
     est cost      = uncached_in*price_in + reads*cache_read_price + writes*cache_write_price + out*price_out
     no-cache cost = tokens_in*price_in + out*price_out
     cache adv.    = no-cache - est  (negative when cache writes outweighed reads)
-    Backends without price_in show token counts only. Local seats: set prices to 0
-    (or leave unset) — their cost is electricity, not tokens."""
+
+    Net savings answers "what did the router save overall?" against the counterfactual
+    of sending ALL chat traffic to the baseline backend, uncached:
+      local routing  — baseline value of tokens served by unpriced (local) backends
+      cheaper tiers  — priced non-baseline backends vs baseline rates
+      prompt caching — the cache advantage
+    Embeddings traffic is shown but excluded from the counterfactual."""
     import json as _json
     from datetime import UTC, datetime, timedelta
 
     from saint.storage import open_db, usage_stats
 
     cfg = _load_or_die(config)
+    baseline = baseline or cfg.routing.default_on_failure
+    bb = cfg.backends.get(baseline)
+    if baseline and bb is None:
+        _emit_err(f"baseline backend '{baseline}' is not defined")
+        raise typer.Exit(2)
+    base_prices = _effective_prices(bb) if bb else None
+
     conn = open_db(Path(cfg.logging.db_path))
     since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     rows = usage_stats(conn, since)
@@ -313,15 +328,17 @@ def log_stats(
     for r in rows:
         b = cfg.backends.get(r["backend_chosen"])
         prices = _effective_prices(b) if b else None
+        is_embed = r["kind"] == "embed"
         entry = {
-            "backend": r["backend_chosen"],
+            "backend": r["backend_chosen"], "kind": r["kind"],
             "requests": r["requests"], "ok": r["ok"], "fail": r["requests"] - r["ok"],
             "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
             "cache_read": r["cache_read"], "cache_write": r["cache_write"],
             "avg_latency_ms": round(r["avg_latency_ms"]) if r["avg_latency_ms"] else None,
             "est_cost": None, "no_cache_cost": None, "cache_advantage": None,
+            "baseline_cost": None,
         }
-        if prices:
+        if prices and not is_embed:
             uncached_in = max(r["tokens_in"] - r["cache_read"] - r["cache_write"], 0)
             est = (uncached_in * prices["in"] + r["cache_read"] * prices["cache_read"]
                    + r["cache_write"] * prices["cache_write"]
@@ -330,15 +347,35 @@ def log_stats(
             entry["est_cost"] = round(est, 4)
             entry["no_cache_cost"] = round(nocache, 4)
             entry["cache_advantage"] = round(nocache - est, 4)
+        if base_prices and not is_embed:
+            entry["baseline_cost"] = round(
+                (r["tokens_in"] * base_prices["in"]
+                 + r["tokens_out"] * base_prices["out"]) / 1e6, 4)
         out_rows.append(entry)
 
     priced = [e for e in out_rows if e["est_cost"] is not None]
-    totals = {
-        "requests": sum(e["requests"] for e in out_rows),
-        "est_cost": round(sum(e["est_cost"] for e in priced), 4) if priced else None,
-        "cache_advantage": (round(sum(e["cache_advantage"] for e in priced), 4)
-                            if priced else None),
-    }
+    est_total = round(sum(e["est_cost"] for e in priced), 4) if priced else None
+    caching_saved = (round(sum(e["cache_advantage"] for e in priced), 4)
+                     if priced else None)
+    totals = {"requests": sum(e["requests"] for e in out_rows),
+              "est_cost": est_total, "cache_advantage": caching_saved}
+    if base_prices:
+        chat = [e for e in out_rows if e["kind"] == "chat" and e["baseline_cost"] is not None]
+        baseline_total = round(sum(e["baseline_cost"] for e in chat), 4)
+        local_saved = round(sum(e["baseline_cost"] for e in chat
+                                if e["est_cost"] is None), 4)
+        tier_saved = round(sum(e["baseline_cost"] - e["no_cache_cost"] for e in chat
+                               if e["est_cost"] is not None), 4)
+        totals.update({
+            "baseline_backend": baseline,
+            "baseline_cost": baseline_total,
+            "net_savings": round(baseline_total - (est_total or 0.0), 4),
+            "savings_breakdown": {
+                "local_routing": local_saved,
+                "cheaper_tiers": tier_saved,
+                "prompt_caching": caching_saved or 0.0,
+            },
+        })
 
     if as_json:
         print(_json.dumps({"window_days": days, "since": since,
@@ -354,20 +391,29 @@ def log_stats(
         t.add_column(col, justify="right" if col != "backend" else "left")
     for e in out_rows:
         fmt = lambda v: f"${v:.2f}" if v is not None else "—"
+        name = e["backend"] + (" (embed)" if e["kind"] == "embed" else "")
         t.add_row(
-            e["backend"], f"{e['requests']} ({e['ok']}/{e['fail']})",
+            name, f"{e['requests']} ({e['ok']}/{e['fail']})",
             f"{e['tokens_in']:,}", f"{e['tokens_out']:,}",
             f"{e['cache_read']:,}", f"{e['cache_write']:,}",
             str(e["avg_latency_ms"] or "—"),
             fmt(e["est_cost"]), fmt(e["no_cache_cost"]), fmt(e["cache_advantage"]),
         )
     Console().print(t)
-    if totals["est_cost"] is not None:
-        adv = totals["cache_advantage"]
-        direction = "saved" if adv >= 0 else "LOST (writes outweighed reads)"
-        typer.secho(f"total est cost ${totals['est_cost']:.2f} — prompt caching "
-                    f"{direction} ${abs(adv):.2f}",
-                    fg=typer.colors.GREEN if adv >= 0 else typer.colors.YELLOW)
+    if est_total is not None:
+        typer.echo(f"actual est cost   ${est_total:.2f}")
+    if base_prices and "net_savings" in totals:
+        bd = totals["savings_breakdown"]
+        typer.echo(f"all-{baseline} counterfactual (uncached): ${totals['baseline_cost']:.2f}")
+        net = totals["net_savings"]
+        typer.secho(
+            f"NET SAVINGS ${net:.2f}  =  local routing ${bd['local_routing']:.2f}"
+            f" + cheaper tiers ${bd['cheaper_tiers']:.2f}"
+            f" + prompt caching ${bd['prompt_caching']:.2f}",
+            fg=typer.colors.GREEN if net >= 0 else typer.colors.YELLOW, bold=True)
+    elif not base_prices:
+        typer.echo(f"(no prices on baseline '{baseline}' — net savings unavailable; "
+                   "set price_in/price_out or pass --baseline)")
 
 
 @log_app.command("prune")

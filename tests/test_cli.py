@@ -327,3 +327,46 @@ def test_cli_log_stats_cost_and_cache_advantage(tmp_path):
     row2 = next(b for b in _json.loads(result2.output)["backends"] if b["backend"] == "cloud-large")
     # extra request: est += 0.1*12.5 = 1.25 ; no-cache += 0.1*10 = 1.0 → advantage 5.45 - 0.25
     assert row2["cache_advantage"] == 5.2
+
+
+def test_cli_log_stats_net_savings(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    # cloud-large priced 10/50; local-small unpriced; default_on_failure = cloud-large
+    cfg_text = SAMPLE_CFG.format(db=db_path.as_posix()).replace(
+        'model = "claude-opus-4-7"',
+        'model = "claude-opus-4-7"\nprice_in = 10.0\nprice_out = 50.0')
+    cfg_path.write_text(cfg_text)
+
+    from tests.test_storage import _row
+    from saint.storage import log_request, open_db
+    conn = open_db(db_path)
+    # local traffic: 2M in / 200k out — at baseline would cost 2*10 + 0.2*50 = $30
+    log_request(conn, _row(backend_chosen="local-small", tokens_in=2_000_000,
+                           tokens_out=200_000))
+    # cloud traffic: 1M in (800k cached reads) / 100k out
+    #   est = 0.1*10 + 0.8*1 + 0.1*12.5 + 0.1*50 = 8.05 ; baseline/no-cache = 15.0
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=1_000_000,
+                           tokens_out=100_000, cache_read_tokens=800_000,
+                           cache_write_tokens=100_000))
+    # embeddings traffic must NOT enter the counterfactual
+    log_request(conn, _row(backend_chosen="local-small", model_field="saint-embeddings",
+                           tokens_in=5_000_000, tokens_out=0))
+    conn.close()
+
+    from typer.testing import CliRunner
+    from saint import cli as cli_mod
+    import json as _json
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["log", "stats", "--json", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    totals = _json.loads(result.output)["totals"]
+    assert totals["baseline_backend"] == "cloud-large"
+    assert totals["baseline_cost"] == 45.0          # $30 local + $15 cloud, embeddings excluded
+    assert totals["est_cost"] == 8.05
+    assert totals["net_savings"] == 36.95
+    bd = totals["savings_breakdown"]
+    assert bd["local_routing"] == 30.0
+    assert bd["cheaper_tiers"] == 0.0               # cloud row IS the baseline backend
+    assert bd["prompt_caching"] == 6.95
+    assert round(bd["local_routing"] + bd["cheaper_tiers"] + bd["prompt_caching"], 2) == 36.95

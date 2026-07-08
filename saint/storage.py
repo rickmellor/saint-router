@@ -238,12 +238,15 @@ _TRAINING_PREDICATE = (
 
 
 def usage_stats(conn: sqlite3.Connection, since: str) -> list[dict]:
-    """Per-backend dispatch aggregates since an ISO-8601 UTC timestamp.
+    """Per-(backend, kind) dispatch aggregates since an ISO-8601 UTC timestamp.
 
-    Excludes saint-explain rows (no dispatch happens). Embeddings traffic appears
-    under its backend with tokens_in only."""
+    Excludes saint-explain rows (no dispatch happens). kind separates 'embed'
+    (/v1/embeddings) from 'chat' so cost counterfactuals never price embedding
+    tokens at chat-model rates."""
     cursor = conn.execute(
-        "SELECT backend_chosen, COUNT(*) AS requests, COALESCE(SUM(success), 0) AS ok, "
+        "SELECT backend_chosen, "
+        "  CASE WHEN model_field = 'saint-embeddings' THEN 'embed' ELSE 'chat' END AS kind, "
+        "  COUNT(*) AS requests, COALESCE(SUM(success), 0) AS ok, "
         "  SUM(COALESCE(tokens_in, 0)) AS tokens_in, "
         "  SUM(COALESCE(tokens_out, 0)) AS tokens_out, "
         "  SUM(COALESCE(cache_read_tokens, 0)) AS cache_read, "
@@ -251,7 +254,7 @@ def usage_stats(conn: sqlite3.Connection, since: str) -> list[dict]:
         "  AVG(backend_latency_ms) AS avg_latency_ms "
         "FROM requests "
         "WHERE ts > ? AND backend_chosen IS NOT NULL AND model_field != 'saint-explain' "
-        "GROUP BY backend_chosen ORDER BY requests DESC",
+        "GROUP BY backend_chosen, kind ORDER BY requests DESC",
         (since,),
     )
     return [_row_to_dict(cursor, r) for r in cursor.fetchall()]
