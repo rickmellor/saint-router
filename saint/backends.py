@@ -135,3 +135,16 @@ async def call_backend(
         for k, v in extra_params.items():
             kwargs.setdefault(k, v)
     return await litellm.acompletion(**kwargs)
+
+
+async def call_embeddings(backend: BackendConfig, input: Any) -> Any:
+    """Dispatch an embeddings request (str or list of str) to a backend."""
+    kwargs: dict[str, Any] = {
+        "model": _resolve_model_id(backend),
+        "input": input,
+        "timeout": backend.timeout_s,
+        "api_key": _resolve_api_key(backend),
+    }
+    if backend.base_url:
+        kwargs["api_base"] = backend.base_url
+    return await litellm.aembedding(**kwargs)

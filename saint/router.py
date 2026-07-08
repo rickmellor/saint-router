@@ -202,7 +202,7 @@ async def decide_route(
     if multimodal and pinned is None:
         return RoutingDecision(
             request_id=request_id, mode=mode,
-            backend=cfg.routing.default_on_failure,
+            backend=cfg.routing.multimodal_backend or cfg.routing.default_on_failure,
             pinned_backend=None, urgency=urgency, parsed=parsed,
             classifier_outcome=None, classifier_result=None,
             multimodal=True, model_field=model_field,

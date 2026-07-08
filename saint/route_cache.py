@@ -88,6 +88,41 @@ class RouteCaches:
     conversations: TTLCache | None  # None when [cache].conversation_affinity = false
 
 
+class Breaker:
+    """Per-backend circuit breaker for dispatch failures.
+
+    After `threshold` consecutive failures a backend's circuit opens for `cooldown_s`:
+    while open, dispatch skips straight to the backend's on_error fallback (when one is
+    configured — with no fallback the primary is still tried). Any success closes it."""
+
+    def __init__(self, threshold: int, cooldown_s: float):
+        self.threshold = threshold
+        self.cooldown_s = cooldown_s
+        self._failures: dict[str, int] = {}
+        self._open_until: dict[str, float] = {}
+
+    def record_failure(self, backend: str) -> None:
+        n = self._failures.get(backend, 0) + 1
+        self._failures[backend] = n
+        if n >= self.threshold:
+            self._open_until[backend] = time.monotonic() + self.cooldown_s
+
+    def record_success(self, backend: str) -> None:
+        self._failures.pop(backend, None)
+        self._open_until.pop(backend, None)
+
+    def is_open(self, backend: str) -> bool:
+        until = self._open_until.get(backend)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            # cooldown elapsed: half-open — allow a try; failure re-opens via threshold
+            self._open_until.pop(backend, None)
+            self._failures[backend] = self.threshold - 1
+            return False
+        return True
+
+
 def turn_key(clf_input: str, urgency: str) -> str:
     return hashlib.sha256(f"{urgency}\x00{clf_input}".encode()).hexdigest()
 

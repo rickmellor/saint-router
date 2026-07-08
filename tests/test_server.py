@@ -239,3 +239,139 @@ def test_session_id_header_inheritance_end_to_end(tmp_path):
     row = _sqlite_row(tmp_path,
         "SELECT classifier_used, backend_chosen FROM requests ORDER BY id DESC LIMIT 1")
     assert row == ("inherited", "cloud-large")  # policy.normal[code,hard]
+
+
+# --- dispatch failover / breaker / headers / embeddings ---
+def _cfg_with_fallback():
+    from dataclasses import replace
+    cfg = _cfg()
+    backends = dict(cfg.backends)
+    backends["cloud-large"] = replace(backends["cloud-large"], on_error="local-small")
+    return replace(cfg, backends=backends)
+
+
+_OK = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"}],
+       "usage": {"prompt_tokens": 3, "completion_tokens": 1}}
+
+
+def test_dispatch_failover_non_streaming(tmp_path):
+    cfg = _cfg_with_fallback()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    mock = AsyncMock(side_effect=[RuntimeError("boom"), RuntimeError("boom"), _OK])
+    with patch("saint.backends.litellm.acompletion", mock):
+        resp = client.post("/v1/chat/completions", json={
+            "model": "saint-cloud-large",
+            "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    assert mock.call_count == 3  # primary + retry, then fallback
+    assert resp.headers["x-saint-backend"] == "local-small"
+    assert resp.headers["x-saint-decided"] == "cloud-large"
+    row = _sqlite_row(tmp_path,
+        "SELECT backend_chosen, state_at_dispatch, success FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == ("local-small", "dispatch_fallback", 1)
+
+
+def test_dispatch_all_candidates_fail_502(tmp_path):
+    cfg = _cfg_with_fallback()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    with patch("saint.backends.litellm.acompletion", AsyncMock(side_effect=RuntimeError("boom"))):
+        resp = client.post("/v1/chat/completions", json={
+            "model": "saint-cloud-large",
+            "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 502
+    row = _sqlite_row(tmp_path, "SELECT success, error_kind FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == (0, "RuntimeError")
+
+
+def test_breaker_skips_primary_after_threshold(tmp_path):
+    from dataclasses import replace
+    cfg = _cfg_with_fallback()
+    cfg = replace(cfg, routing=replace(cfg.routing, breaker_failures=2, retry_same_backend=True))
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    req = {"model": "saint-cloud-large", "messages": [{"role": "user", "content": "hi"}]}
+    # request 1: primary fails twice (breaker opens at 2), fallback serves
+    m1 = AsyncMock(side_effect=[RuntimeError("boom"), RuntimeError("boom"), _OK])
+    with patch("saint.backends.litellm.acompletion", m1):
+        assert client.post("/v1/chat/completions", json=req).status_code == 200
+    # request 2: breaker open -> straight to fallback (single call)
+    m2 = AsyncMock(return_value=_OK)
+    with patch("saint.backends.litellm.acompletion", m2):
+        resp = client.post("/v1/chat/completions", json=req)
+    assert resp.status_code == 200
+    assert m2.call_count == 1
+    assert resp.headers["x-saint-backend"] == "local-small"
+
+
+def test_streaming_failover_before_first_chunk(tmp_path):
+    cfg = _cfg_with_fallback()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    mock = AsyncMock(side_effect=[RuntimeError("boom"), RuntimeError("boom"),
+                                  _FakeStreamChunks(chunks)])
+    with patch("saint.backends.litellm.acompletion", mock):
+        with client.stream("POST", "/v1/chat/completions", json={
+            "model": "saint-cloud-large",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }) as resp:
+            headers = dict(resp.headers)
+            text = "".join(resp.iter_text())
+    assert "hi" in text and "data: [DONE]" in text
+    assert headers["x-saint-backend"] == "local-small"
+    row = _sqlite_row(tmp_path,
+        "SELECT backend_chosen, state_at_dispatch FROM requests ORDER BY id DESC LIMIT 1")
+    assert row == ("local-small", "dispatch_fallback")
+
+
+def test_route_headers_on_classified_request(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    payload = json.dumps({"domain": "code", "complexity": "medium", "reason": "."})
+    with patch("saint.classifier.call_backend",
+               AsyncMock(return_value={"choices": [{"message": {"content": payload}}]})), \
+         patch("saint.backends.litellm.acompletion", AsyncMock(return_value=_OK)):
+        resp = client.post("/v1/chat/completions", json={
+            "model": "saint-auto",
+            "messages": [{"role": "user", "content": "write me a widget parser"}]})
+    assert resp.headers["x-saint-backend"] == "local-coder"
+    assert resp.headers["x-saint-domain"] == "code"
+    assert resp.headers["x-saint-complexity"] == "medium"
+    assert "x-saint-decided" not in resp.headers  # no fallback hop taken
+
+
+def test_embeddings_endpoint_routes_and_logs(tmp_path):
+    from dataclasses import replace
+    cfg = _cfg()
+    cfg = replace(cfg, routing=replace(cfg.routing, embeddings_backend="local-small"))
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    emb = {"object": "list", "data": [{"object": "embedding", "index": 0,
+                                       "embedding": [0.1, 0.2]}],
+           "model": "nomic", "usage": {"prompt_tokens": 5, "total_tokens": 5}}
+    with patch("saint.backends.litellm.aembedding", AsyncMock(return_value=emb)) as m:
+        resp = client.post("/v1/embeddings", json={"model": "anything", "input": "hello"})
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["embedding"] == [0.1, 0.2]
+    assert resp.headers["x-saint-backend"] == "local-small"
+    assert m.call_args.kwargs["input"] == "hello"
+    row = _sqlite_row(tmp_path,
+        "SELECT model_field, backend_chosen, tokens_in, prompt_content FROM requests "
+        "ORDER BY id DESC LIMIT 1")
+    assert row == ("saint-embeddings", "local-small", 5, None)
+
+
+def test_embeddings_endpoint_unconfigured_404(tmp_path):
+    cfg = _cfg()  # embeddings_backend unset
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    resp = client.post("/v1/embeddings", json={"input": "hello"})
+    assert resp.status_code == 404

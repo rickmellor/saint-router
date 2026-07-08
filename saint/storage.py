@@ -42,9 +42,11 @@ class LogRow:
 def build_log_row(decision, *, model_field, backend_latency_ms, success, error_kind,
                   tokens_in, tokens_out, prompt_storage_mode,
                   johnny_seat=None, state_at_dispatch=None,
-                  cache_read_tokens=None, cache_write_tokens=None) -> LogRow:
+                  cache_read_tokens=None, cache_write_tokens=None,
+                  backend_override=None) -> LogRow:
     """Map a RoutingDecision (+ dispatch outcome) to a LogRow. Dispatch-less callers
-    (e.g. `saint explain`) pass backend_latency_ms/tokens as None."""
+    (e.g. `saint explain`) pass backend_latency_ms/tokens as None. `backend_override`
+    is the backend that actually served when a dispatch-failure fallback hop was taken."""
     out = decision.classifier_outcome
     return LogRow(
         request_id=decision.request_id,
@@ -60,7 +62,7 @@ def build_log_row(decision, *, model_field, backend_latency_ms, success, error_k
         classifier_domain=(out.result.domain if out and out.result else None),
         classifier_complexity=(out.result.complexity if out and out.result else None),
         classifier_reason=(out.result.reason if out and out.result else None),
-        backend_chosen=decision.backend,
+        backend_chosen=backend_override or decision.backend,
         backend_latency_ms=backend_latency_ms,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
@@ -223,6 +225,47 @@ def count_training_rows_since(conn: sqlite3.Connection, ts: str) -> int:
         ")) AND ts > ?",
         (ts,),
     ).fetchone()[0]
+
+
+# Rows usable for classifier distillation (kept by default when pruning).
+_TRAINING_PREDICATE = (
+    "(prompt_content IS NOT NULL AND classifier_domain IS NOT NULL "
+    "AND classifier_complexity IS NOT NULL "
+    "AND (classifier_used IS NULL OR ("
+    "  classifier_used NOT LIKE '%embed-head%' "
+    "  AND classifier_used NOT IN ('cache', 'inherited'))))"
+)
+
+
+def usage_stats(conn: sqlite3.Connection, since: str) -> list[dict]:
+    """Per-backend dispatch aggregates since an ISO-8601 UTC timestamp.
+
+    Excludes saint-explain rows (no dispatch happens). Embeddings traffic appears
+    under its backend with tokens_in only."""
+    cursor = conn.execute(
+        "SELECT backend_chosen, COUNT(*) AS requests, COALESCE(SUM(success), 0) AS ok, "
+        "  SUM(COALESCE(tokens_in, 0)) AS tokens_in, "
+        "  SUM(COALESCE(tokens_out, 0)) AS tokens_out, "
+        "  SUM(COALESCE(cache_read_tokens, 0)) AS cache_read, "
+        "  SUM(COALESCE(cache_write_tokens, 0)) AS cache_write, "
+        "  AVG(backend_latency_ms) AS avg_latency_ms "
+        "FROM requests "
+        "WHERE ts > ? AND backend_chosen IS NOT NULL AND model_field != 'saint-explain' "
+        "GROUP BY backend_chosen ORDER BY requests DESC",
+        (since,),
+    )
+    return [_row_to_dict(cursor, r) for r in cursor.fetchall()]
+
+
+def prune_requests(conn: sqlite3.Connection, cutoff_ts: str, keep_training: bool = True) -> int:
+    """Delete rows older than cutoff_ts. keep_training preserves rows the classifier
+    trainer could still use, so pruning history never eats training data. VACUUMs."""
+    q = "DELETE FROM requests WHERE ts < ?"
+    if keep_training:
+        q += f" AND NOT {_TRAINING_PREDICATE}"
+    cursor = conn.execute(q, (cutoff_ts,))
+    conn.execute("VACUUM")
+    return cursor.rowcount
 
 
 def clear_requests(conn: sqlite3.Connection) -> int:
