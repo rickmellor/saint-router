@@ -197,6 +197,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                        if cfg.cache.conversation_affinity else None),
     )
     app.state.breaker = Breaker(cfg.routing.breaker_failures, cfg.routing.breaker_cooldown_s)
+    if cfg.has_bedrock:
+        from saint.bedrock_auth import apply_bedrock_auth_patch
+        apply_bedrock_auth_patch()
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
