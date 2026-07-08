@@ -1,0 +1,372 @@
+import json
+import subprocess
+import sys
+from unittest.mock import AsyncMock, patch
+
+SAMPLE_CFG = """
+[server]
+host = "127.0.0.1"
+port = 4000
+
+[backends.cloud-large]
+provider = "anthropic"
+model = "claude-opus-4-7"
+api_key_env = "ANTHROPIC_API_KEY"
+aliases = ["opus"]
+timeout_s = 120
+
+[backends.local-small]
+provider = "openai"
+base_url = "http://localhost:1234/v1"
+model = "qwen2.5-3b-instruct"
+api_key = "lm-studio"
+timeout_s = 60
+
+[classifier]
+backend = "local-small"
+max_input_chars = 8000
+timeout_s = 5
+
+[routing]
+default_urgency = "normal"
+default_on_failure = "cloud-large"
+
+[routing.policy.normal]
+"code,trivial"    = "local-small"
+"code,medium"     = "local-small"
+"code,hard"       = "cloud-large"
+"general,trivial" = "local-small"
+"general,medium"  = "local-small"
+"general,hard"    = "cloud-large"
+
+[routing.policy.urgent]
+"code,trivial"    = "local-small"
+"code,medium"     = "cloud-large"
+"code,hard"       = "cloud-large"
+"general,trivial" = "cloud-large"
+"general,medium"  = "cloud-large"
+"general,hard"    = "cloud-large"
+
+[routing.policy.patient]
+"code,trivial"    = "local-small"
+"code,medium"     = "local-small"
+"code,hard"       = "local-small"
+"general,trivial" = "local-small"
+"general,medium"  = "local-small"
+"general,hard"    = "local-small"
+
+[logging]
+db_path = "{db}"
+prompt_storage = "full"
+"""
+
+
+def test_cli_help_lists_commands():
+    out = subprocess.run([sys.executable, "-m", "saint", "--help"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0
+    for cmd in ("serve", "explain", "policy", "config", "log", "relabel"):
+        assert cmd in out.stdout
+
+
+def test_cli_serve_help():
+    out = subprocess.run([sys.executable, "-m", "saint", "serve", "--help"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0
+    out_low = out.stdout.lower()
+    assert "host" in out_low or "port" in out_low
+
+
+def test_cli_explain_prints_decision(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "novel refactor"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        result = runner.invoke(cli_mod.app, ["explain", "rewrite my code", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert "Routing decision" in result.output
+    assert "code" in result.output and "hard" in result.output
+
+
+def test_cli_explain_logs_classification(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "novel refactor"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        result = runner.invoke(cli_mod.app, ["explain", "rewrite my code", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert "Logged as row #1" in result.output
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT model_field, classifier_domain, classifier_complexity, prompt_content, "
+        "backend_latency_ms, tokens_in, tokens_out FROM requests"
+    ).fetchall()
+    conn.close()
+    assert rows == [("saint-explain", "code", "hard", "rewrite my code", None, None, None)]
+
+
+def test_cli_explain_test_flag_skips_logging(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "general", "complexity": "trivial", "reason": "greeting"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        result = runner.invoke(
+            cli_mod.app, ["explain", "Hello.", "--test", "--config", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.output
+    assert "Not logged (--test)." in result.output
+    assert not db_path.exists()
+
+
+def test_cli_log_clear(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    payload = json.dumps({"domain": "code", "complexity": "hard", "reason": "novel refactor"})
+    response = {"choices": [{"message": {"content": payload}}]}
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    with patch("saint.classifier.call_backend", AsyncMock(return_value=response)):
+        runner.invoke(cli_mod.app, ["explain", "rewrite my code", "--config", str(cfg_path)])
+
+    # declining the confirmation leaves the row in place
+    result = runner.invoke(cli_mod.app, ["log", "clear", "--config", str(cfg_path)], input="n\n")
+    assert result.exit_code != 0  # typer.confirm(abort=True)
+
+    result = runner.invoke(cli_mod.app, ["log", "clear", "--yes", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert "Deleted 1 rows" in result.output
+
+    result = runner.invoke(cli_mod.app, ["log", "clear", "--yes", "--config", str(cfg_path)])
+    assert result.exit_code == 0
+    assert "already empty" in result.output
+
+
+def test_cli_policy_show(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(SAMPLE_CFG.format(db=(tmp_path / "log.sqlite").as_posix()))
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["policy", "show", "--config", str(cfg_path)])
+    assert result.exit_code == 0
+    for urgency in ("normal", "urgent", "patient"):
+        assert urgency in result.output
+    assert "code,hard" in result.output
+
+
+def test_cli_config_show_masks_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-key-do-not-print")
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(SAMPLE_CFG.format(db=(tmp_path / "log.sqlite").as_posix()))
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["config", "show", "--config", str(cfg_path)])
+    assert result.exit_code == 0
+    assert "secret-key-do-not-print" not in result.output
+    assert "Cloud backends present" in result.output
+
+
+def test_cli_log_show_and_id(tmp_path):
+    from saint.storage import log_request, open_db
+    from tests.test_storage import _row
+
+    db_path = tmp_path / "log.sqlite"
+    conn = open_db(db_path)
+    log_request(conn, _row(request_id="row-A", backend_chosen="local-coder"))
+    log_request(conn, _row(request_id="row-B", backend_chosen="cloud-large"))
+    conn.close()
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+
+    r1 = runner.invoke(cli_mod.app, ["log", "show", "--config", str(cfg_path)])
+    assert r1.exit_code == 0, r1.output
+    assert "row-A" in r1.output and "row-B" in r1.output
+
+    r2 = runner.invoke(cli_mod.app, ["log", "show", "--backend", "local-coder",
+                                      "--config", str(cfg_path)])
+    assert r2.exit_code == 0
+    assert "row-A" in r2.output and "row-B" not in r2.output
+
+    r3 = runner.invoke(cli_mod.app, ["log", "id", "1", "--config", str(cfg_path)])
+    assert r3.exit_code == 0
+    assert "row-A" in r3.output
+
+
+def test_cli_relabel_last_and_by_id(tmp_path):
+    from saint.storage import get_by_id, log_request, open_db
+    from tests.test_storage import _row
+
+    db_path = tmp_path / "log.sqlite"
+    conn = open_db(db_path)
+    log_request(conn, _row(request_id="r1"))
+    log_request(conn, _row(request_id="r2"))
+    conn.close()
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+
+    r = runner.invoke(cli_mod.app, ["relabel", "last", "cloud-large",
+                                     "--note", "wrong",
+                                     "--config", str(cfg_path)])
+    assert r.exit_code == 0, r.output
+
+    conn = open_db(db_path)
+    last = get_by_id(conn, 2)
+    assert last is not None and last["relabel_backend"] == "cloud-large"
+
+    r = runner.invoke(cli_mod.app, ["relabel", "by-id", "1", "local-small",
+                                     "--config", str(cfg_path)])
+    assert r.exit_code == 0, r.output
+    first = get_by_id(conn, 1)
+    assert first is not None and first["relabel_backend"] == "local-small"
+
+
+def test_cli_relabel_undefined_backend_rejected(tmp_path):
+    from saint.storage import log_request, open_db
+    from tests.test_storage import _row
+
+    db_path = tmp_path / "log.sqlite"
+    conn = open_db(db_path)
+    log_request(conn, _row())
+    conn.close()
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()))
+
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    runner = CliRunner()
+    r = runner.invoke(cli_mod.app, ["relabel", "last", "phantom",
+                                     "--config", str(cfg_path)])
+    assert r.exit_code != 0
+    assert "phantom" in r.output
+
+
+def test_cli_log_stats_cost_and_cache_advantage(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_text = SAMPLE_CFG.format(db=db_path.as_posix()).replace(
+        'model = "claude-opus-4-7"',
+        'model = "claude-opus-4-7"\nprice_in = 10.0\nprice_out = 50.0')
+    cfg_path.write_text(cfg_text)
+
+    from tests.test_storage import _row
+    from saint.storage import log_request, open_db
+    conn = open_db(db_path)
+    # 1M in / 100k out, 800k cache reads, 300k cache writes (write-heavy: negative advantage)
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=1_000_000,
+                           tokens_out=100_000, cache_read_tokens=800_000,
+                           cache_write_tokens=300_000))
+    conn.close()
+
+    from typer.testing import CliRunner
+    from saint import cli as cli_mod
+    import json as _json
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["log", "stats", "--json", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    row = next(b for b in data["backends"] if b["backend"] == "cloud-large")
+    # anthropic derivation: read 1.0/Mtok (0.1x), write 12.5/Mtok (1.25x)
+    # est  = 0*10 + 0.8*1 + 0.3*12.5 + 0.1*50 = 9.55 ; no-cache = 1*10 + 0.1*50 = 15.0
+    assert row["est_cost"] == 9.55
+    assert row["no_cache_cost"] == 15.0
+    assert row["cache_advantage"] == 5.45
+    # write-only day: advantage goes negative (the "or lack thereof")
+    conn = open_db(db_path)
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=100_000, tokens_out=0,
+                           cache_read_tokens=0, cache_write_tokens=100_000))
+    conn.close()
+    result2 = runner.invoke(cli_mod.app, ["log", "stats", "--json", "--config", str(cfg_path)])
+    row2 = next(b for b in _json.loads(result2.output)["backends"] if b["backend"] == "cloud-large")
+    # extra request: est += 0.1*12.5 = 1.25 ; no-cache += 0.1*10 = 1.0 → advantage 5.45 - 0.25
+    assert row2["cache_advantage"] == 5.2
+
+
+def test_cli_log_stats_net_savings(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    # cloud-large priced 10/50; local-small unpriced; default_on_failure = cloud-large
+    cfg_text = SAMPLE_CFG.format(db=db_path.as_posix()).replace(
+        'model = "claude-opus-4-7"',
+        'model = "claude-opus-4-7"\nprice_in = 10.0\nprice_out = 50.0')
+    cfg_path.write_text(cfg_text)
+
+    from tests.test_storage import _row
+    from saint.storage import log_request, open_db
+    conn = open_db(db_path)
+    # local traffic: 2M in / 200k out — at baseline would cost 2*10 + 0.2*50 = $30
+    log_request(conn, _row(backend_chosen="local-small", tokens_in=2_000_000,
+                           tokens_out=200_000))
+    # cloud traffic: 1M in (800k cached reads) / 100k out
+    #   est = 0.1*10 + 0.8*1 + 0.1*12.5 + 0.1*50 = 8.05 ; baseline/no-cache = 15.0
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=1_000_000,
+                           tokens_out=100_000, cache_read_tokens=800_000,
+                           cache_write_tokens=100_000))
+    # embeddings traffic must NOT enter the counterfactual
+    log_request(conn, _row(backend_chosen="local-small", model_field="saint-embeddings",
+                           tokens_in=5_000_000, tokens_out=0))
+    conn.close()
+
+    from typer.testing import CliRunner
+    from saint import cli as cli_mod
+    import json as _json
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["log", "stats", "--json", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    totals = _json.loads(result.output)["totals"]
+    assert totals["baseline_backend"] == "cloud-large"
+    assert totals["baseline_cost"] == 45.0          # $30 local + $15 cloud, embeddings excluded
+    assert totals["est_cost"] == 8.05
+    assert totals["net_savings"] == 36.95
+    bd = totals["savings_breakdown"]
+    assert bd["local_routing"] == 30.0
+    assert bd["cheaper_tiers"] == 0.0               # cloud row IS the baseline backend
+    assert bd["prompt_caching"] == 6.95
+    assert round(bd["local_routing"] + bd["cheaper_tiers"] + bd["prompt_caching"], 2) == 36.95

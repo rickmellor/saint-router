@@ -1,0 +1,300 @@
+{"domain": "code", "complexity": "trivial", "prompt": "How do I reverse a list in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does the ?? operator do in JavaScript?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What's the syntax for a ternary expression in C?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I check if a key exists in a Python dict?"}
+{"domain": "code", "complexity": "trivial", "prompt": "Git command to discard all local changes?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I convert a string to an int in Java?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What's the printf format specifier for a size_t?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I comment out multiple lines in Lua?"}
+{"domain": "code", "complexity": "trivial", "prompt": "Regex to match exactly a 4-digit number?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I get the length of an array in Bash?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does chmod +x do?"}
+{"domain": "code", "complexity": "trivial", "prompt": "In SQL, is there any difference between != and <>?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I import a module from a parent directory in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I print to stderr in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I declare a constant in Go?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does the static keyword mean on a C function?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I round a float to 2 decimal places in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "Command to list all docker containers, including stopped ones?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I write a dictionary literal in Swift?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What's the null-safe navigation operator in Kotlin?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does the yield keyword do in Python, in one line?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I concatenate two lists in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does npm ci do differently from npm install?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I get yesterday's date in a bash script?"}
+{"domain": "code", "complexity": "trivial", "prompt": "One line: difference between let and var in JavaScript?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I convert an int to a String in Rust?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What header do I include for std::vector?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I check which git branch I'm currently on?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does the % operator return for negative numbers in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I set an environment variable in PowerShell?"}
+{"domain": "code", "complexity": "trivial", "prompt": "SQL to select distinct values from a column?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I sleep for 500ms in JavaScript?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What flag makes grep case-insensitive?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I stringify a JSON object in JavaScript?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What is the maximum value of a signed 32-bit integer?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I create an empty set in Python — {} or set()?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does git stash pop do?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I get the current timestamp in milliseconds in Java?"}
+{"domain": "code", "complexity": "trivial", "prompt": "Which HTML tag makes text bold?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I redirect stderr to stdout in bash?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What's the Pythonic way to swap two variables?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I kill whatever process is using port 8080 on Linux?"}
+{"domain": "code", "complexity": "trivial", "prompt": "In CSS, how do I center a div horizontally using margin?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does SELECT COUNT(*) return on an empty table?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I parse a hex string into an int in C#?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What's the integer division operator in Python?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I add a column to an existing table in SQLite?"}
+{"domain": "code", "complexity": "trivial", "prompt": "What does the -r flag do in cp -r?"}
+{"domain": "code", "complexity": "trivial", "prompt": "How do I trim whitespace from both ends of a string in Java?"}
+{"domain": "code", "complexity": "trivial", "prompt": "Python list comprehension to square the numbers 1 through 10?"}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Python function that groups a list of dicts by a given key."}
+{"domain": "code", "complexity": "medium", "prompt": "Why does const x = JSON.parse(undefined) throw, and how should I guard against it?"}
+{"domain": "code", "complexity": "medium", "prompt": "Write a bash script that watches a directory and prints the name of any file that changes."}
+{"domain": "code", "complexity": "medium", "prompt": "Convert a callback-style Node fs.readFile call to async/await with proper error handling."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a SQL query to find duplicate email addresses in a users table."}
+{"domain": "code", "complexity": "medium", "prompt": "I keep getting IndexError: list index out of range inside a while loop that removes items. Explain the typical causes and the fix pattern."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a regex that validates an ISO-8601 date (YYYY-MM-DD) including sensible month and day ranges."}
+{"domain": "code", "complexity": "medium", "prompt": "Implement a simple LRU cache in Python using OrderedDict."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Go function that retries an HTTP GET up to 3 times with exponential backoff."}
+{"domain": "code", "complexity": "medium", "prompt": "My Dockerfile re-runs pip install on every build even when requirements didn't change. How do I order the layers so caching works?"}
+{"domain": "code", "complexity": "medium", "prompt": "Write a pytest unit test for a function that should raise ValueError on negative input."}
+{"domain": "code", "complexity": "medium", "prompt": "Explain what [x*y for x in a for y in b if y] does and rewrite it as nested loops."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a debounce function in JavaScript."}
+{"domain": "code", "complexity": "medium", "prompt": "Create a CSS grid layout with a 250px sidebar, fluid main content, and a full-width footer."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Python decorator that logs the function name and execution time."}
+{"domain": "code", "complexity": "medium", "prompt": "In pandas, how do I merge two DataFrames on a column but keep only the rows that didn't match on the right side?"}
+{"domain": "code", "complexity": "medium", "prompt": "Fix the off-by-one in: for (int i = 0; i <= arr.length; i++) sum += arr[i];"}
+{"domain": "code", "complexity": "medium", "prompt": "Write a systemd service unit for a Python script that should restart on failure."}
+{"domain": "code", "complexity": "medium", "prompt": "Convert this SQL to SQLAlchemy: SELECT * FROM orders WHERE total > 100 ORDER BY created_at DESC LIMIT 10."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a small C function that counts the set bits in a 32-bit integer."}
+{"domain": "code", "complexity": "medium", "prompt": "Show how to parse command-line flags in Go's standard library, with one string flag and one int flag."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a TypeScript generic type for a paginated API response that wraps any item type."}
+{"domain": "code", "complexity": "medium", "prompt": "My React input component re-renders the whole form on every keystroke. Explain how useMemo and useCallback help and where to apply them."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Python generator that yields sliding windows of size n over a list."}
+{"domain": "code", "complexity": "medium", "prompt": "Explain the bug in if (user = admin) in C and the compiler flag that catches it."}
+{"domain": "code", "complexity": "medium", "prompt": "Shell one-liner to find the 10 largest files under /var."}
+{"domain": "code", "complexity": "medium", "prompt": "Implement binary search in Rust returning Option<usize>."}
+{"domain": "code", "complexity": "medium", "prompt": "Why is except Exception: pass considered harmful in Python, and what's the better pattern for logging and re-raising?"}
+{"domain": "code", "complexity": "medium", "prompt": "Write a SQL migration that adds a nullable jsonb column with a default and backfills existing rows."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a JavaScript function that deep-clones an object without using structuredClone."}
+{"domain": "code", "complexity": "medium", "prompt": "How do I split my last git commit into two separate commits? Walk me through the commands."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Kotlin extension function that chunks a string every n characters."}
+{"domain": "code", "complexity": "medium", "prompt": "Show me how to mock requests.get in a Python unit test."}
+{"domain": "code", "complexity": "medium", "prompt": "Write an nginx config that reverse-proxies /api to localhost:8080 with websocket support."}
+{"domain": "code", "complexity": "medium", "prompt": "Explain and fix: RuntimeError: dictionary changed size during iteration in Python."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Ruby method that flattens a nested hash into dot-notation keys."}
+{"domain": "code", "complexity": "medium", "prompt": "Implement FizzBuzz in Haskell."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a PowerShell script that deletes files older than 30 days from a given folder."}
+{"domain": "code", "complexity": "medium", "prompt": "My asyncio code awaits three API calls one after another. Show how to run them concurrently."}
+{"domain": "code", "complexity": "medium", "prompt": "Add input validation to an Express route handler so it returns 400 on missing fields."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a C# LINQ query that groups orders by customer and sums their totals."}
+{"domain": "code", "complexity": "medium", "prompt": "Explain the difference between INNER JOIN and LEFT JOIN with a small worked example."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Makefile target that only rebuilds when the source files actually changed."}
+{"domain": "code", "complexity": "medium", "prompt": "How do I safely include user input in a SQL query in Python? Show parameterized query examples."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Vue 3 composable that tracks the window size reactively."}
+{"domain": "code", "complexity": "medium", "prompt": "Implement a stack that supports push, pop, and max() all in O(1) time."}
+{"domain": "code", "complexity": "medium", "prompt": "Write a Python script that renames every .jpeg file in a folder to .jpg."}
+{"domain": "code", "complexity": "medium", "prompt": "Show how to read a CSV with a custom delimiter in Python and skip malformed rows without crashing."}
+{"domain": "code", "complexity": "medium", "prompt": "The Rust borrow checker rejects my function that returns a reference to a local String. Why, and what's the idiomatic fix?"}
+{"domain": "code", "complexity": "medium", "prompt": "Write a GitHub Actions workflow that runs the test suite on every push to main."}
+{"domain": "code", "complexity": "hard", "prompt": "Design a rate limiter for a distributed API gateway: token bucket vs sliding window, Redis coordination, clock skew, and burst handling. Include pseudo-code for the hot path."}
+{"domain": "code", "complexity": "hard", "prompt": "Our monolith's ORM layer does N+1 queries across 40 endpoints. Propose a migration strategy to eliminate them without a big-bang rewrite, including how to detect regressions in CI."}
+{"domain": "code", "complexity": "hard", "prompt": "Refactor a 5,000-line God class that handles orders, payments, and shipping into separate services. Which seams do you cut first, and how do you keep the tests green throughout?"}
+{"domain": "code", "complexity": "hard", "prompt": "There's a race condition somewhere in our multithreaded C++ job queue: workers occasionally process the same job twice, and shutdown rarely deadlocks. Give a systematic strategy to find and fix both, and the memory-ordering invariants the fix must maintain."}
+{"domain": "code", "complexity": "hard", "prompt": "Design the schema and indexing strategy for a multi-tenant SaaS with 10k tenants where some tenants are 1000x larger than others. Cover row-level security, hot-tenant isolation, and the migration path from our single-tenant schema."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement a diff algorithm for tree structures like React's reconciliation. Explain the complexity tradeoffs versus Myers diff and sketch the core code."}
+{"domain": "code", "complexity": "hard", "prompt": "Our Kafka consumers keep rebalancing under load and we lose ordering within aggregates. Redesign the partitioning and consumer-group strategy and explain the exactly-once tradeoffs."}
+{"domain": "code", "complexity": "hard", "prompt": "Port a fused-attention CUDA kernel to HIP for RDNA4, accounting for wavefront size differences, LDS limits, and missing intrinsics. Outline the performance validation plan."}
+{"domain": "code", "complexity": "hard", "prompt": "Design an end-to-end plugin system for a Python CLI: sandboxing, a versioned plugin API, dependency isolation, discovery, and backward compatibility across releases."}
+{"domain": "code", "complexity": "hard", "prompt": "A Rust service leaks memory only under production traffic; jemalloc stats show fragmentation, and valgrind finds nothing under test load. Give a full investigation plan and the most likely causes."}
+{"domain": "code", "complexity": "hard", "prompt": "Design the conflict-resolution layer for a collaborative text editor: CRDT vs OT, offline edits, and undo semantics. Sketch the core data structures."}
+{"domain": "code", "complexity": "hard", "prompt": "Plan a zero-downtime migration of a 200-table Oracle schema with embedded PL/SQL business logic to Postgres: sequencing, dual-write phase, and validation."}
+{"domain": "code", "complexity": "hard", "prompt": "Design a toy JIT compiler for a stack-based bytecode VM: IR choice, register allocation on x86-64, deoptimization strategy, and a minimal working example."}
+{"domain": "code", "complexity": "hard", "prompt": "We have a distributed transaction spanning four microservices. Design a saga with compensation, idempotency keys, and partial-failure observability, and show the state machine code."}
+{"domain": "code", "complexity": "hard", "prompt": "Our C service spends 40% of CPU time in malloc. Design an arena allocation strategy that doesn't break the plugin ABI, including the benchmark methodology to prove it."}
+{"domain": "code", "complexity": "hard", "prompt": "Design a search-as-you-type system over 50 million documents: index structure, typo tolerance, ranking, cache invalidation on writes, and a p99 under 50ms."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement software transactional memory in Go: API design, conflict detection, retry semantics, and an honest analysis of where it loses to plain mutexes."}
+{"domain": "code", "complexity": "hard", "prompt": "A legacy Perl ETL pipeline of 30 cron scripts sharing state through temp files must become idempotent and observable without stopping nightly runs. Design the migration."}
+{"domain": "code", "complexity": "hard", "prompt": "Design the authorization layer for a healthcare API: RBAC vs ABAC vs ReBAC, audit requirements, cache coherence when permissions change, and break-glass access."}
+{"domain": "code", "complexity": "hard", "prompt": "Our WebSocket fan-out service falls over at 100k connections. Redesign it: epoll strategy, backpressure, slow-client handling, and horizontal scaling with or without sticky sessions."}
+{"domain": "code", "complexity": "hard", "prompt": "Build an incremental parser for a custom DSL that re-parses on every keystroke: error recovery, syntax-tree reuse, and a comparison to tree-sitter's approach."}
+{"domain": "code", "complexity": "hard", "prompt": "Fourteen modules in our Python monorepo have circular imports that only break at runtime under gevent. Give a dependency-inversion refactor plan and the import-linter rules to keep it fixed."}
+{"domain": "code", "complexity": "hard", "prompt": "Design deterministic replay for a multiplayer game server: floating-point divergence, RNG seeding, input buffering, and cross-platform determinism."}
+{"domain": "code", "complexity": "hard", "prompt": "Our CI takes 90 minutes. Design the caching, test-sharding, and dependency-graph strategy to get under 10, including an incremental test-selection system."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement zero-copy deserialization for a custom binary protocol in Rust: lifetimes over borrowed buffers, alignment, versioning, and the fuzzing strategy."}
+{"domain": "code", "complexity": "hard", "prompt": "The spec says only 'make the dashboard fast'. Produce a concrete performance engineering plan for a React + GraphQL stack: metrics, budgets, instrumentation, and the five most likely fixes."}
+{"domain": "code", "complexity": "hard", "prompt": "Design a feature-flag system supporting gradual rollout, mutually exclusive experiments, and kill switches, including SDK behavior when the flag service is unreachable and the evaluation engine's data model."}
+{"domain": "code", "complexity": "hard", "prompt": "Our JVM service has 2-second GC pauses, but only on Tuesdays. Lay out the full investigation methodology, the JFR events to capture, and the three most likely causes."}
+{"domain": "code", "complexity": "hard", "prompt": "Write the design doc for migrating our auth from server sessions to JWTs: revocation, refresh rotation, XSS/CSRF implications, the backward-compat window — and argue whether we should do it at all."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement consistent hashing with bounded loads for our cache tier. Analyze rebalancing cost versus jump hash and maglev, and code the ring with virtual nodes."}
+{"domain": "code", "complexity": "hard", "prompt": "Our Cortex-M4 firmware with 256KB RAM needs OTA updates with rollback. Design the bootloader, partition scheme, power-loss safety, and delta update format."}
+{"domain": "code", "complexity": "hard", "prompt": "A Node service returns stale data 0.1% of the time, only in production, only after deploys. Design the investigation across the load balancer, DNS, connection pooling, and module caching."}
+{"domain": "code", "complexity": "hard", "prompt": "Design a query planner for a time-series store: predicate pushdown, chunk pruning, out-of-order writes, and downsampling correctness. Sketch the plan-tree data structures."}
+{"domain": "code", "complexity": "hard", "prompt": "Refactor 80 nearly-identical React CRUD pages into a config-driven form engine without freezing feature work: codemod strategy, escape hatches, and rollout plan."}
+{"domain": "code", "complexity": "hard", "prompt": "Build a secrets-rotation system across 200 services in mixed frameworks: injection, zero-downtime rotation, detecting hardcoded stragglers, and controlling blast radius."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement a lock-free MPMC queue in C++, show how you handle the ABA problem, and design the benchmark against a mutex baseline across contention levels."}
+{"domain": "code", "complexity": "hard", "prompt": "Elasticsearch tail latency spikes during segment merges. Redesign the indexing pipeline: refresh intervals, tiered storage, merge policy, and a hot-warm architecture."}
+{"domain": "code", "complexity": "hard", "prompt": "Design static analysis that detects SQL injection flowing through our custom ORM's string-building layer: taint-tracking granularity, false-positive budget, and CI integration."}
+{"domain": "code", "complexity": "hard", "prompt": "Make a synchronous Django monolith handle 50x traffic on the same hardware: async views versus offloading, connection pooling, cache stampede protection — and the measurement plan that decides between them."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement the core of differential dataflow for incremental analytics: explain arrangement sharing and write the operators for a running group-by-count over a change stream."}
+{"domain": "code", "complexity": "hard", "prompt": "A closed-source third-party SDK we embed segfaults intermittently in production. Design the mitigation: subprocess isolation, core-dump pipeline, ABI shimming, and the evidence package for vendor escalation."}
+{"domain": "code", "complexity": "hard", "prompt": "Design the storage engine for an append-heavy event store: LSM vs B-tree, compaction scheduling, snapshot isolation for readers, torn-write recovery, and justified fsync placement."}
+{"domain": "code", "complexity": "hard", "prompt": "Our GraphQL API lets clients send pathologically nested queries that OOM the server. Design depth and complexity limiting plus persisted queries, with a migration that doesn't break existing clients."}
+{"domain": "code", "complexity": "hard", "prompt": "Add speculative hedged requests to our RPC layer after p95: idempotency requirements, cancellation propagation, load-amplification modeling, and the rollout experiment."}
+{"domain": "code", "complexity": "hard", "prompt": "Our Bazel monorepo's remote cache hit rate dropped from 90% to 40% after a toolchain upgrade across 40k targets. Give the root-cause methodology and the instrumentation to prevent recurrence."}
+{"domain": "code", "complexity": "hard", "prompt": "Design multi-region active-active for a Postgres-backed API: conflict classes, CRDT versus application-level merge, read-your-writes guarantees, and behavior during a region partition."}
+{"domain": "code", "complexity": "hard", "prompt": "Design a fuzzing strategy for our C parser library: corpus seeding, coverage-guided mutation, the sanitizer matrix, automated crash triage, and the CI time budget."}
+{"domain": "code", "complexity": "hard", "prompt": "Our ML feature pipeline recomputes everything nightly in 6 hours. Redesign it for incremental computation with late-arriving data, backfills, and point-in-time correctness for training sets."}
+{"domain": "code", "complexity": "hard", "prompt": "Implement JVM bytecode instrumentation to trace object allocation in a running service without restart: agent design, safepoint implications, overhead budget, and how to avoid perturbing the GC you're measuring."}
+{"domain": "code", "complexity": "hard", "prompt": "Take a single-threaded Python game-of-life simulator to a GPU implementation: memory layout, kernel design, minimizing host-device transfers, and validation against the CPU reference."}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the capital of Australia?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many ounces are in a pound?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What year did the Berlin Wall fall?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What does et al. mean?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Convert 72 degrees Fahrenheit to Celsius."}
+{"domain": "general", "complexity": "trivial", "prompt": "Who wrote 1984?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What time zone is Chicago in?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the plural of cactus?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many days are in February during a leap year?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What does GDP stand for?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Who painted the Mona Lisa?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the chemical symbol for gold?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many continents are there?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the speed of light in kilometers per second?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Define ubiquitous in one line."}
+{"domain": "general", "complexity": "trivial", "prompt": "What currency does Japan use?"}
+{"domain": "general", "complexity": "trivial", "prompt": "When is the summer solstice in the northern hemisphere?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many bones are in the adult human body?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the tallest mountain in the world?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Who was the first person to walk on the moon?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What does RSVP stand for?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Botanically speaking, is a tomato a fruit or a vegetable?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many liters are in a US gallon?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the largest planet in our solar system?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What language is spoken in Brazil?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How do you spell necessary?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What is the boiling point of water at sea level in Fahrenheit?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Who wrote Romeo and Juliet?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the square root of 144?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Which ocean is the largest?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What does circa mean before a date?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many strings does a standard guitar have?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What is the freezing point of water in Kelvin?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the longest river in the world?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What year did World War I begin?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's a group of crows called?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many minutes are in a full week?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What vitamin does your body make from sunlight?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the national bird of the United States?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Convert 10 kilometers to miles."}
+{"domain": "general", "complexity": "trivial", "prompt": "What does i.e. stand for?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Who is the Greek god of the sea?"}
+{"domain": "general", "complexity": "trivial", "prompt": "How many sides does a hexagon have?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the smallest prime number?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Which country has the largest population?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What do AM and PM stand for?"}
+{"domain": "general", "complexity": "trivial", "prompt": "Name the three primary colors."}
+{"domain": "general", "complexity": "trivial", "prompt": "What's the currency of Switzerland?"}
+{"domain": "general", "complexity": "trivial", "prompt": "In what city is the Eiffel Tower?"}
+{"domain": "general", "complexity": "trivial", "prompt": "What's 15% of 200?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain how compound interest works with a simple example."}
+{"domain": "general", "complexity": "medium", "prompt": "Write a short professional email declining a meeting invitation politely."}
+{"domain": "general", "complexity": "medium", "prompt": "Summarize the plot of Moby-Dick in one paragraph."}
+{"domain": "general", "complexity": "medium", "prompt": "What are the main differences between a Roth IRA and a traditional IRA?"}
+{"domain": "general", "complexity": "medium", "prompt": "Give me a 3-day itinerary for a long weekend in Portland, Oregon."}
+{"domain": "general", "complexity": "medium", "prompt": "Explain how vaccines create immunity in terms a 10-year-old would understand."}
+{"domain": "general", "complexity": "medium", "prompt": "Compare the AMD Threadripper 3945WX and 5995WX for a workstation build."}
+{"domain": "general", "complexity": "medium", "prompt": "What should I look for when buying a used car? Give me a practical checklist."}
+{"domain": "general", "complexity": "medium", "prompt": "Explain the difference between weather and climate."}
+{"domain": "general", "complexity": "medium", "prompt": "Draft a polite follow-up message to a recruiter after two weeks of silence."}
+{"domain": "general", "complexity": "medium", "prompt": "What are the pros and cons of renting versus buying a home?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain how noise-canceling headphones work."}
+{"domain": "general", "complexity": "medium", "prompt": "Suggest five dinner ideas for someone who can't eat gluten or dairy."}
+{"domain": "general", "complexity": "medium", "prompt": "What's the difference between a 401(k) and a pension?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain the US electoral college in a few sentences."}
+{"domain": "general", "complexity": "medium", "prompt": "Write a wedding toast for my best friend — warm, a little funny, about 60 seconds."}
+{"domain": "general", "complexity": "medium", "prompt": "How does a heat pump heat a house in winter?"}
+{"domain": "general", "complexity": "medium", "prompt": "Compare OLED and Mini-LED TVs for a bright living room."}
+{"domain": "general", "complexity": "medium", "prompt": "What are good strategies for negotiating a salary offer?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain what inflation is and why central banks raise interest rates to fight it."}
+{"domain": "general", "complexity": "medium", "prompt": "Plan a birthday party for a 7-year-old with a $200 budget."}
+{"domain": "general", "complexity": "medium", "prompt": "What's the difference between whiskey, bourbon, and scotch?"}
+{"domain": "general", "complexity": "medium", "prompt": "Summarize the rules of pickleball for a complete beginner."}
+{"domain": "general", "complexity": "medium", "prompt": "How should I prepare for a behavioral job interview? Include example questions."}
+{"domain": "general", "complexity": "medium", "prompt": "Explain the difference between a will and a living trust."}
+{"domain": "general", "complexity": "medium", "prompt": "Write a short apology note to my neighbor for last weekend's noisy party."}
+{"domain": "general", "complexity": "medium", "prompt": "Give me a brief overview of the health tradeoffs of intermittent fasting."}
+{"domain": "general", "complexity": "medium", "prompt": "How do solar panels convert sunlight into electricity?"}
+{"domain": "general", "complexity": "medium", "prompt": "Compare flying versus driving for a 500-mile trip with two young kids — cost, time, and sanity."}
+{"domain": "general", "complexity": "medium", "prompt": "Explain why the sky is blue but sunsets are red."}
+{"domain": "general", "complexity": "medium", "prompt": "Give me a beginner strength-training plan, three days a week, no gym equipment."}
+{"domain": "general", "complexity": "medium", "prompt": "What's the difference between espresso, lungo, and americano?"}
+{"domain": "general", "complexity": "medium", "prompt": "Draft a one-paragraph speaker bio from these facts: 15 years in logistics, VP at a freight startup, marathon runner."}
+{"domain": "general", "complexity": "medium", "prompt": "How does a compound bow differ from a recurve for a beginner archer?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain what causes jet lag and evidence-based ways to reduce it."}
+{"domain": "general", "complexity": "medium", "prompt": "What questions should I ask when touring a daycare?"}
+{"domain": "general", "complexity": "medium", "prompt": "Compare the Mediterranean diet and the DASH diet."}
+{"domain": "general", "complexity": "medium", "prompt": "How do hurricanes form? Explain the key conditions."}
+{"domain": "general", "complexity": "medium", "prompt": "Write a for-sale ad for a used kayak in good condition."}
+{"domain": "general", "complexity": "medium", "prompt": "What's the difference between a housing co-op and a condo?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain herd immunity and its threshold in simple terms."}
+{"domain": "general", "complexity": "medium", "prompt": "Suggest a reading list of five books for understanding modern China."}
+{"domain": "general", "complexity": "medium", "prompt": "How do credit scores work, and what moves them fastest?"}
+{"domain": "general", "complexity": "medium", "prompt": "Explain the difference between mediation and arbitration."}
+{"domain": "general", "complexity": "medium", "prompt": "Give me a framework for planning a low-key first date in an unfamiliar city."}
+{"domain": "general", "complexity": "medium", "prompt": "Why do airlines overbook flights? Explain the economics briefly."}
+{"domain": "general", "complexity": "medium", "prompt": "What are the tradeoffs between electric and gas lawn mowers?"}
+{"domain": "general", "complexity": "medium", "prompt": "Describe how a bill becomes a law in the United States in one paragraph."}
+{"domain": "general", "complexity": "medium", "prompt": "My sourdough starter isn't rising. What are the likely causes?"}
+{"domain": "general", "complexity": "medium", "prompt": "Compare Airbnb versus hotels for a two-week European trip with a family of four."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze the economic tradeoffs of universal basic income versus a negative income tax for a mid-size developed economy, including labor-supply effects, administrative costs, and political durability."}
+{"domain": "general", "complexity": "hard", "prompt": "Draft a three-year strategic plan for a 50-person nonprofit expanding into two new regions while funding stays flat. Include a risk register and sequencing."}
+{"domain": "general", "complexity": "hard", "prompt": "Compare Kuhn's and Popper's philosophies of science and apply them to how psychology should respond to its replication crisis."}
+{"domain": "general", "complexity": "hard", "prompt": "Write a 1,000-word essay arguing whether the printing press or the internet caused the larger epistemic disruption, with historical evidence for both sides."}
+{"domain": "general", "complexity": "hard", "prompt": "Evaluate whether a mid-size city should replace its bus fleet with light rail: capital versus operating costs, ridership elasticity, equity impacts, and the honest counterfactuals."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze the second-order effects of remote work on urban tax bases, commercial real estate, and small-business ecosystems over the next decade."}
+{"domain": "general", "complexity": "hard", "prompt": "Our third-generation family manufacturing business with 40 employees has a buyout offer at 6x EBITDA. Walk through the decision framework: succession, market cycle, employee obligations, and negotiation strategy."}
+{"domain": "general", "complexity": "hard", "prompt": "Assess the geopolitical implications of rare-earth supply concentration for energy transition policy, and evaluate the realistic diversification options and their timelines."}
+{"domain": "general", "complexity": "hard", "prompt": "Design a research methodology to determine whether a four-day workweek affects productivity in knowledge work, addressing selection bias, Hawthorne effects, and outcome measurement."}
+{"domain": "general", "complexity": "hard", "prompt": "Critique utilitarianism's treatment of individual rights using the transplant problem, and evaluate the rule-utilitarian and contractualist responses."}
+{"domain": "general", "complexity": "hard", "prompt": "A regional hospital system must cut 8% of its budget without touching direct patient care. Analyze where the money hides, the second-order risks of each cut, and the change-management sequencing."}
+{"domain": "general", "complexity": "hard", "prompt": "Compare the causes of the 2008 financial crisis to conditions in today's private credit markets. Where does the analogy hold, and where does it break down?"}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze whether social media platforms should be legally liable for algorithmic amplification as distinct from hosting, including First Amendment and Section 230 implications."}
+{"domain": "general", "complexity": "hard", "prompt": "Develop a decision framework for a school district weighing a phone ban: quality of the evidence, enforcement burden, equity effects, and how to run it as a proper pilot."}
+{"domain": "general", "complexity": "hard", "prompt": "Argue both sides of whether gene editing for disease prevention in embryos should be permitted — germline distinction, consent problems, slippery-slope rebuttals — then take a position."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze the strategic options for a mid-tier streaming service facing industry consolidation: merge, niche down, pivot to licensing, or expand the ad tier. Model the tradeoffs."}
+{"domain": "general", "complexity": "hard", "prompt": "How should a democracy handle deepfakes released in the last 72 hours before an election? Design the policy, its enforcement mechanics, and its failure modes."}
+{"domain": "general", "complexity": "hard", "prompt": "Synthesize the current evidence on microplastics and human health: what's established, what's suggestive, what's noise, and which studies would actually settle it."}
+{"domain": "general", "complexity": "hard", "prompt": "Write a memo advising a city council on regulating short-term rentals, balancing housing supply, tourism revenue, and enforcement cost, with three policy options modeled out."}
+{"domain": "general", "complexity": "hard", "prompt": "Explain the strongest proposed resolutions to the Fermi paradox and rank them by plausibility with your reasoning."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze how the interstate highway system reshaped American race and class geography, and which modern infrastructure decisions are repeating the pattern."}
+{"domain": "general", "complexity": "hard", "prompt": "A founder can take a $2M seed round at tough terms now or bootstrap 18 more months with roughly 60% odds of better terms. Build the decision analysis, including the option value of waiting."}
+{"domain": "general", "complexity": "hard", "prompt": "Evaluate nuclear versus renewables-plus-storage for decarbonizing a grid at 45 degrees latitude: capacity factors, storage-duration economics, waste, and political feasibility."}
+{"domain": "general", "complexity": "hard", "prompt": "Construct the strongest argument that AGI timelines are shorter than consensus expects, then the strongest rebuttal, then adjudicate between them."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze Japan's three decades of deflation: which policy interventions failed, why they failed, and what it teaches other aging economies."}
+{"domain": "general", "complexity": "hard", "prompt": "Design a fair kidney-exchange mechanism and analyze where market-design principles come into conflict with medical ethics."}
+{"domain": "general", "complexity": "hard", "prompt": "Compare the failure of Reconstruction after the American Civil War with post-apartheid South Africa's transition: what did each get right and wrong institutionally?"}
+{"domain": "general", "complexity": "hard", "prompt": "Assess the case for and against congestion pricing in a US city with mediocre transit coverage, including the equity math and realistic mitigations."}
+{"domain": "general", "complexity": "hard", "prompt": "My 78-year-old mother with early dementia refuses assisted living but can no longer safely live alone. Analyze the ethical, legal, and practical options and their consequences."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze whether the college wage premium still justifies rising tuition for the median student, decomposing selection effects from treatment effects."}
+{"domain": "general", "complexity": "hard", "prompt": "Write a scenario analysis for global grain markets if the Black Sea were blockaded for three years: substitution, price transmission, and famine-risk mapping."}
+{"domain": "general", "complexity": "hard", "prompt": "Evaluate the argument that zoning reform alone can solve housing affordability, and where supply skepticism has a legitimate point. Take a defensible position."}
+{"domain": "general", "complexity": "hard", "prompt": "Develop an argument about what the Antikythera mechanism implies for how we should model technological progress and regression across civilizations."}
+{"domain": "general", "complexity": "hard", "prompt": "A university must allocate a $40M gift between financial aid, faculty lines, and deferred maintenance. Build the allocation framework, including how to compare value across such different goods."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze the incentive structures that produce scientific fraud and design a reform package that journals and funders would realistically adopt."}
+{"domain": "general", "complexity": "hard", "prompt": "Compare how Athens and Rome handled the tension between empire and self-governance, and what their failure modes suggest for modern federations."}
+{"domain": "general", "complexity": "hard", "prompt": "Should juries be told about jury nullification? Analyze the constitutional history, the arguments on both sides, and the systemic effects of each answer."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze the macroeconomic consequences of a rapid global shift to sovereign digital currencies for correspondent banking, sanctions enforcement, and the monetary sovereignty of small economies."}
+{"domain": "general", "complexity": "hard", "prompt": "Assess whether professional licensing beyond safety-critical fields is net-positive, using barbers, interior designers, and nurse practitioners as case studies."}
+{"domain": "general", "complexity": "hard", "prompt": "Build a framework for deciding when a company should take a public political stance, and stress-test it against three recent controversies."}
+{"domain": "general", "complexity": "hard", "prompt": "Explain the strongest current hypotheses for the Younger Dryas cooling event and evaluate the impact-hypothesis controversy as a case study in how science handles fringe claims."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze the tradeoffs of mandatory national service for a polarized democracy: the cohesion evidence, economic cost, liberty objections, and the design parameters that actually matter."}
+{"domain": "general", "complexity": "hard", "prompt": "A publisher must decide whether to license its full archive for LLM training. Analyze revenue, precedent, author relations, and long-term strategic position, then recommend with reasoning."}
+{"domain": "general", "complexity": "hard", "prompt": "Evaluate the claim that Green Revolution yield gains are plateauing, and analyze what that means for feeding 10 billion people, including the realistic role of gene editing."}
+{"domain": "general", "complexity": "hard", "prompt": "Design a truth-and-reconciliation process for a country emerging from a decade of civil conflict where both sides committed atrocities and the judiciary is compromised."}
+{"domain": "general", "complexity": "hard", "prompt": "Analyze why US life expectancy diverged from peer countries after 1980, decomposing the drivers and evaluating which policy levers have real evidence behind them."}
+{"domain": "general", "complexity": "hard", "prompt": "Should central banks target asset prices? Steelman both positions with historical episodes, then give your adjudication."}
+{"domain": "general", "complexity": "hard", "prompt": "My co-founder wants to pivot our profitable-but-slow SaaS into a risky AI product. Equity is 50/50 and we disagree. Analyze the negotiation space, governance mechanics, and the decision framework we should use."}
+{"domain": "general", "complexity": "hard", "prompt": "Compare the Ottoman millet system with modern multicultural policy frameworks and analyze what each reveals about managing pluralism at scale."}
+{"domain": "general", "complexity": "hard", "prompt": "Assess the evidence on whether early foreign-language immersion produces lasting cognitive benefits, separating the strong claims from the marketing."}

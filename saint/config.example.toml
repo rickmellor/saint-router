@@ -1,0 +1,194 @@
+# saint configuration. Generate your own with `saint config init`, then edit.
+
+[server]
+host = "127.0.0.1"
+port = 4000
+
+# ---- Backends ----------------------------------------------------------
+# Names are arbitrary identifiers. `aliases` give short names you can use
+# as prefixes (e.g. "!opus" or "@opus") in the latest user message — same for
+# urgencies ("@patient ..."). Use '@' from terminal agents that steal '!' for
+# their shell escape (pi, opencode); an unknown @token is plain text, not an error.
+# API keys: prefer `api_key_env` (read from the named environment variable) for
+# real keys; local OpenAI-compatible servers (vLLM, llama.cpp) ignore the key,
+# so a literal placeholder like api_key = "local" is fine there.
+#
+# The local backends below follow the johnny "run profile" pattern: each seat in
+# the profile has a fixed port and a role (see `johnny profile save`). The static
+# base_url is the profile's port — a valid fallback even across reboots — and
+# `johnny_role` binds the backend to live resolution: on every dispatch SAINT asks
+# `johnny resolve <role>` and, when the seat is ready, johnny's live endpoint/model
+# OVERRIDE the static base_url/model. SAINT stays fully functional with johnny
+# absent — bound backends just use their static config.
+
+[backends.cloud-large]
+provider     = "anthropic"
+model        = "claude-opus-4-7"
+api_key_env  = "ANTHROPIC_API_KEY"
+aliases      = ["opus", "claude"]
+timeout_s    = 120
+
+[backends.cloud-small]
+provider     = "anthropic"
+model        = "claude-haiku-4-5-20251001"
+api_key_env  = "ANTHROPIC_API_KEY"
+aliases      = ["haiku"]
+timeout_s    = 60
+
+[backends.local-coder]
+provider     = "openai"
+base_url     = "http://localhost:8003/v1"     # static fallback = the profile's 'coder' port
+model        = "qwen-27b-coder"
+api_key      = "local"
+aliases      = ["coder"]
+timeout_s    = 180
+johnny_role  = "coder"
+on_error     = "local-chat"                   # dispatch-failure fallback: one hop, never chained
+# while_loading = "cloud-small"               # per-backend warm-up target (else [routing].while_loading)
+# Use johnny_seat = "<seat>" instead of johnny_role to bind a specific seat by name.
+# Optional pricing (USD per Mtok) powers `saint log stats` cost + cache-advantage columns.
+# Anthropic backends derive missing cache prices as 0.1x (read) / 1.25x (write) of price_in.
+# price_in = 5.0
+# price_out = 25.0
+
+[backends.local-chat]
+provider     = "openai"
+base_url     = "http://localhost:8002/v1"     # static fallback = the profile's 'chat' port
+model        = "gemma-4-26B-A4B-it-FP8-Dynamic"
+api_key      = "local"
+aliases      = ["gemma"]
+timeout_s    = 180
+johnny_role  = "chat"
+
+# ---- Embedding backend (optional) --------------------------------------
+# A local embeddings endpoint (e.g. nomic-embed served by johnny on CPU). Only needed
+# for classifier.mode = "embedding". provider/model still required for config validity.
+[backends.local-embed]
+provider     = "openai"
+base_url     = "http://localhost:8001/v1"     # static fallback = the profile's 'embed' port
+model        = "nomic-embed"
+api_key      = "local"
+timeout_s    = 10
+johnny_role  = "embed"
+
+# A small, fast model for the LLM classifier — e.g. a quantized 1B GGUF on CPU via
+# johnny's llama.cpp backend (`johnny induct <gguf> --device cpu`), leaving the GPUs
+# to the seats that answer.
+[backends.local-classifier]
+provider     = "openai"
+base_url     = "http://localhost:8000/v1"     # static fallback = the profile's 'classifier' port
+model        = "gemma-3-1B-it-QAT-Q4_0"
+api_key      = "local"
+timeout_s    = 10
+johnny_role  = "classifier"
+
+# ---- Classifier --------------------------------------------------------
+[classifier]
+# mode = "llm" (default): prompt a chat model for (domain, complexity).
+# mode = "embedding": embed the prompt (embedding_backend) + a tiny trained head — ~50-100x
+#   faster on CPU, deterministic. It falls back to the LLM classifier (backend below) when
+#   the head is untrained or below min_confidence, so `backend` is still required.
+# Bootstrap path: run in mode="llm" with logging.prompt_storage = "full" until
+#   `saint classifier status` shows enough labeled rows, then `saint classifier train`
+#   (it distills the LLM's own labels) and flip mode = "embedding".
+mode              = "llm"
+backend           = "local-classifier"  # the LLM classifier (and the embedding-mode fallback)
+fallback_backend  = "local-chat"        # used for oversize input or primary failure (optional)
+embedding_backend = "local-embed"       # required when mode = "embedding"
+min_confidence    = 0.6                 # below this, the head defers to the LLM classifier
+# head_path       = "~/.config/saint/classifier_head.npz"   # trained head (default shown)
+max_input_chars   = 8000                # primary's input cap (head-truncate if no fallback)
+timeout_s         = 10                  # allow headroom for a CPU-served classifier seat
+# Agent clients (hermes, opencode, …) often append memory-recall/context blocks to the
+# user message; classifying that blob instead of the request skews routing. List the
+# markers here to truncate CLASSIFIER input (and the logged prompt) at the first match —
+# dispatch always forwards the full message untouched.
+# ignore_after    = ["\n\n[fabric]", "<memory-context>"]
+
+# ---- Routing -----------------------------------------------------------
+[routing]
+default_urgency    = "normal"
+default_on_failure = "cloud-large"    # last-resort backend if classifier and fallback both fail.
+                                      # Set to a local backend if running offline-only.
+while_loading      = "cloud-small"    # serve here while a johnny-bound seat warms up (a *normal*
+                                      # state on a reaped box — distinct from default_on_failure).
+# multimodal_backend = "local-vision" # image/audio requests (unset → default_on_failure)
+embeddings_backend = "local-embed"    # serves /v1/embeddings through the router (unset = disabled)
+retry_same_backend = true             # one immediate retry before the on_error hop
+breaker_failures   = 3                # consecutive dispatch failures that open a backend's circuit
+breaker_cooldown_s = 60               # open circuit skips the primary for this long
+
+[routing.policy.normal]
+"code,trivial"    = "local-coder"
+"code,medium"     = "local-coder"
+"code,hard"       = "cloud-large"
+"general,trivial" = "local-chat"
+"general,medium"  = "local-chat"
+"general,hard"    = "cloud-large"
+
+[routing.policy.urgent]
+"code,trivial"    = "local-coder"
+"code,medium"     = "cloud-small"
+"code,hard"       = "cloud-large"
+"general,trivial" = "cloud-small"
+"general,medium"  = "cloud-small"
+"general,hard"    = "cloud-large"
+
+# patient = prefer local even when slower; hard cells stay on the strongest local seats.
+[routing.policy.patient]
+"code,trivial"    = "local-coder"
+"code,medium"     = "local-coder"
+"code,hard"       = "local-coder"
+"general,trivial" = "local-chat"
+"general,medium"  = "local-chat"
+"general,hard"    = "local-chat"
+
+# ---- Caching (agent-loop economics) -------------------------------------
+# Agent clients (pi, hermes, opencode) turn one prompt into N API calls: the last
+# user message repeats while tool history grows. Defaults are designed-on.
+[cache]
+# Turn cache: classify a given (message, urgency) once; loop turns reuse the labels.
+# Kills classifier flap (nondeterministic medium->hard re-rolls escalating one turn
+# to cloud) and per-turn classifier latency. Logged as classifier_used = "cache";
+# excluded from classifier training.
+turn_cache        = true
+turn_ttl_s        = 300      # spans an agent loop; matches Anthropic's 5-min cache
+turn_max_entries  = 1024
+# Conversation affinity: keyed by hash(first system msg + first non-system msg) —
+# or an explicit `x-session-id` header / `session_id` body field. Short follow-ups
+# ("yes, do that") inherit the conversation's labels instead of classifying out of
+# context (classifier_used = "inherited"). TTL is SLIDING (refreshed each turn):
+# active work keeps affinity alive, walking away expires it.
+conversation_affinity     = true
+conversation_ttl_s        = 900
+conversation_max_entries  = 512
+short_follow_up_max_chars = 40
+# sticky_conversations = true   # always inherit (OpenRouter-style); off by default —
+                                # a session that starts trivial would pin hard prompts local.
+# Anthropic prompt caching: rolling cache_control breakpoints on the system message
+# and the last text message (5-min TTL; reads 0.1x, writes 1.25x input price).
+# Explicit pins, explain, and non-anthropic backends are unaffected; OpenAI-provider
+# backends cache implicitly with no breakpoints needed.
+anthropic_prompt_caching = true
+prompt_cache_min_chars   = 4000   # skip tiny prompts (below Anthropic's cacheable minimum)
+# anthropic_cache_ttl    = "1h"   # longer cache window at 2x write cost (default 5m)
+
+# ---- johnny integration (optional) -------------------------------------
+# Present iff any backend has a johnny binding (johnny_role/johnny_seat). johnny is a
+# local-inference manager that owns model lifecycle + liveness; SAINT asks it where a
+# role is and whether it's ready, and (optionally) triggers a non-blocking load.
+# SAINT stays fully functional with johnny absent — bound backends use their static config.
+[johnny]
+transport           = "cli"        # "cli" (shell out to `johnny`) | "http" (johnnyd)
+cli_path            = "johnny"      # CLI transport: the johnny executable
+# base_url          = "http://127.0.0.1:8080"   # HTTP transport: johnnyd base url
+resolve_cache_ttl_s = 1.0           # cache resolve() results this long (hot path)
+ensure_load         = true          # may SAINT trigger loads, or only observe + fall back?
+
+# ---- Logging -----------------------------------------------------------
+[logging]
+db_path        = "~/.config/saint/log.sqlite"
+prompt_storage = "full"   # "full" | "hashed" | "none"
+                          # full:   readable later; useful for relabeling and future training
+                          # hashed: SHA-256 only; deduplication possible without retaining content
+                          # none:   metadata only (latency, tokens, decisions)

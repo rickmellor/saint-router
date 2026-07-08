@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+# Local scratch / debug output
+test_run_*.txt
+.env
+.env.local
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
