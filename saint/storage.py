@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -35,11 +35,14 @@ class LogRow:
     prompt_storage_mode: str  # "full" | "hashed" | "none"
     johnny_seat: str | None = None  # resolved seat when the backend was johnny-bound
     state_at_dispatch: str | None = None  # johnny_ready|static_baseline|while_loading|fallback|None
+    cache_read_tokens: int | None = None   # provider prompt-cache reads (see migration 0003)
+    cache_write_tokens: int | None = None  # provider prompt-cache writes
 
 
 def build_log_row(decision, *, model_field, backend_latency_ms, success, error_kind,
                   tokens_in, tokens_out, prompt_storage_mode,
-                  johnny_seat=None, state_at_dispatch=None) -> LogRow:
+                  johnny_seat=None, state_at_dispatch=None,
+                  cache_read_tokens=None, cache_write_tokens=None) -> LogRow:
     """Map a RoutingDecision (+ dispatch outcome) to a LogRow. Dispatch-less callers
     (e.g. `saint explain`) pass backend_latency_ms/tokens as None."""
     out = decision.classifier_outcome
@@ -67,6 +70,8 @@ def build_log_row(decision, *, model_field, backend_latency_ms, success, error_k
         prompt_storage_mode=prompt_storage_mode,
         johnny_seat=johnny_seat,
         state_at_dispatch=state_at_dispatch,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -97,6 +102,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if current < 2:
         conn.executescript(_load_migration("0002_johnny.sql"))
         conn.execute("PRAGMA user_version = 2")
+    if current < 3:
+        conn.executescript(_load_migration("0003_cache_metrics.sql"))
+        conn.execute("PRAGMA user_version = 3")
 
 
 def _apply_storage_mode(content: str | None, mode: str) -> str | None:
@@ -120,14 +128,14 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             classifier_input_truncated_from, classifier_latency_ms, classifier_domain,
             classifier_complexity, classifier_reason, backend_chosen, backend_latency_ms,
             tokens_in, tokens_out, success, error_kind, prompt_content, prompt_storage_mode,
-            johnny_seat, state_at_dispatch
+            johnny_seat, state_at_dispatch, cache_read_tokens, cache_write_tokens
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
-            ?, ?
+            ?, ?, ?, ?
         )
         """,
         (
@@ -140,9 +148,29 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             row.tokens_in, row.tokens_out, 1 if row.success else 0, row.error_kind,
             stored, row.prompt_storage_mode,
             row.johnny_seat, row.state_at_dispatch,
+            row.cache_read_tokens, row.cache_write_tokens,
         ),
     )
     return int(cursor.lastrowid or 0)
+
+
+def fetch_training_rows(conn: sqlite3.Connection, limit: int) -> list[tuple]:
+    """Recent (prompt, domain, complexity) rows usable for classifier distillation.
+
+    Excludes rows labeled by the embedding head itself (no self-distillation feedback
+    loop) and by the routing caches ('cache'/'inherited' — reused labels, not fresh
+    classifier judgments)."""
+    return conn.execute(
+        "SELECT prompt_content, classifier_domain, classifier_complexity FROM requests "
+        "WHERE prompt_content IS NOT NULL AND classifier_domain IS NOT NULL "
+        "AND classifier_complexity IS NOT NULL "
+        "AND (classifier_used IS NULL OR ("
+        "  classifier_used NOT LIKE '%embed-head%' "
+        "  AND classifier_used NOT IN ('cache', 'inherited')"
+        ")) "
+        "ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
 
 
 def clear_requests(conn: sqlite3.Connection) -> int:

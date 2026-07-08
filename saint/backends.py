@@ -6,6 +6,76 @@ from typing import Any
 import litellm
 
 from saint.config import BackendConfig
+from saint.route_cache import content_text
+
+
+def _mark_content(content: Any, cc: dict[str, Any]) -> Any:
+    """Copy `content` into Anthropic block form with cache_control on the last text
+    block. Never mutates the input. Returns the input unchanged if there is no text."""
+    if isinstance(content, str):
+        if not content:
+            return content
+        return [{"type": "text", "text": content, "cache_control": cc}]
+    if isinstance(content, list):
+        last_text = max((i for i, p in enumerate(content)
+                         if isinstance(p, dict) and p.get("type") == "text" and p.get("text")),
+                        default=None)
+        if last_text is None:
+            return content
+        out = [dict(p) if isinstance(p, dict) else p for p in content]
+        out[last_text]["cache_control"] = cc
+        return out
+    return content
+
+
+def inject_cache_control(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    *,
+    min_chars: int,
+    ttl: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+    """Rolling Anthropic prompt-cache breakpoints (copy-on-write; inputs untouched).
+
+    Marks the first system message and the last text-bearing message with
+    cache_control — because the breakpoint sits on the *last* message, every
+    agent-loop turn re-marks the new tail and the previous prefix becomes a cache
+    read. When there is no system message, the last tool is marked instead (in
+    Anthropic request order tools precede system precede messages, so a system
+    breakpoint already covers tools). <= 2 of Anthropic's 4 breakpoints used.
+
+    Skips entirely (returns inputs unchanged) below `min_chars` of total message
+    text: cache writes cost 1.25x, and short prompts are below Anthropic's
+    cacheable minimum anyway.
+    """
+    total = sum(len(content_text(m.get("content"))) for m in messages)
+    if total < min_chars:
+        return messages, tools
+
+    cc: dict[str, Any] = {"type": "ephemeral"}
+    if ttl:
+        cc["ttl"] = ttl
+
+    out = list(messages)
+    sys_idx = next((i for i, m in enumerate(out) if m.get("role") == "system"), None)
+    if sys_idx is not None:
+        marked = _mark_content(out[sys_idx].get("content"), cc)
+        if marked is not out[sys_idx].get("content"):
+            out[sys_idx] = {**out[sys_idx], "content": marked}
+
+    # rolling breakpoint: last message with actual text (skips content=None
+    # assistant tool-call messages and pure-image turns)
+    for i in range(len(out) - 1, -1, -1):
+        if content_text(out[i].get("content")):
+            marked = _mark_content(out[i].get("content"), cc)
+            if marked is not out[i].get("content"):
+                out[i] = {**out[i], "content": marked}
+            break
+
+    out_tools = tools
+    if sys_idx is None and tools:
+        out_tools = [*tools[:-1], {**tools[-1], "cache_control": cc}]
+    return out, out_tools
 
 
 def _resolve_api_key(b: BackendConfig) -> str | None:

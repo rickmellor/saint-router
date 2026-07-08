@@ -209,3 +209,162 @@ def test_apply_stripping_no_user_message_unchanged():
     messages = [{"role": "system", "content": "x"}]
     out = apply_stripping(messages, stripped_last_user=None)
     assert out == messages
+
+
+# --- routing caches (turn cache + conversation affinity) ---
+def _caches():
+    from saint.route_cache import RouteCaches, TTLCache
+    return RouteCaches(turns=TTLCache(300, 64), conversations=TTLCache(900, 64))
+
+
+def _payload(domain, complexity):
+    p = json.dumps({"domain": domain, "complexity": complexity, "reason": "r"})
+    return {"choices": [{"message": {"content": p}}]}
+
+
+async def test_turn_cache_classifies_once():
+    cfg = _cfg()
+    caches = _caches()
+    prompt = "refactor the widget parser so it streams tokens instead of buffering"
+    msgs = [{"role": "system", "content": "agent"}, {"role": "user", "content": prompt}]
+    mock = AsyncMock(return_value=_payload("code", "medium"))
+    with patch("saint.classifier.call_backend", mock):
+        d1 = await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto",
+                                messages=msgs + [{"role": "assistant", "content": "ok"},
+                                                 {"role": "user", "content": prompt}],
+                                caches=caches)
+    assert mock.call_count == 1
+    assert d1.backend == d2.backend == "local-coder"
+    assert d2.classifier_outcome.classifier_used == "cache"
+    assert d2.classifier_result.latency_ms == 0
+
+
+async def test_turn_cache_kills_flap():
+    cfg = _cfg()
+    caches = _caches()
+    msgs = [{"role": "user", "content": "review the code and tell me more please"}]
+    mock = AsyncMock(side_effect=[_payload("code", "medium"), _payload("code", "hard")])
+    with patch("saint.classifier.call_backend", mock):
+        d1 = await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs, caches=caches)
+    # without the cache, turn 2 would have re-rolled to code,hard -> cloud-large
+    assert d1.backend == d2.backend == "local-coder"
+
+
+async def test_caches_bypassed_for_pins_and_explain():
+    cfg = _cfg()
+    caches = _caches()
+    mock = AsyncMock(return_value=_payload("general", "trivial"))
+    with patch("saint.classifier.call_backend", mock):
+        # pinned via model field: no classification, nothing cached
+        await decide_route(cfg=cfg, model_field="saint-cloud-large",
+                           messages=[{"role": "user", "content": "hello there friend"}],
+                           caches=caches)
+        assert len(caches.turns) == 0 and len(caches.conversations) == 0
+        # explain classifies but never caches
+        await decide_route(cfg=cfg, model_field="saint-explain",
+                           messages=[{"role": "user", "content": "hello there friend"}],
+                           caches=caches)
+    assert len(caches.turns) == 0 and len(caches.conversations) == 0
+
+
+async def test_classifier_failure_not_cached():
+    cfg = _cfg()
+    caches = _caches()
+    msgs = [{"role": "user", "content": "some prompt that fails to classify"}]
+    ok = _payload("code", "trivial")
+    mock = AsyncMock(side_effect=[RuntimeError("boom"), ok])
+    with patch("saint.classifier.call_backend", mock):
+        d1 = await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs, caches=caches)
+    assert d1.backend == "cloud-large"      # default_on_failure
+    assert d2.backend == "local-coder"      # re-classified, not served from cache
+    assert mock.call_count == 2
+
+
+async def test_short_follow_up_inherits_conversation_labels():
+    cfg = _cfg()
+    caches = _caches()
+    first = [{"role": "system", "content": "agent"},
+             {"role": "user", "content": "explore the saint-router repo and refactor decide_route into pure helpers"}]
+    follow = first + [{"role": "assistant", "content": "Which repo did you mean?"},
+                      {"role": "user", "content": "yes, sorry. saint-router"}]
+    mock = AsyncMock(return_value=_payload("code", "hard"))
+    with patch("saint.classifier.call_backend", mock):
+        d1 = await decide_route(cfg=cfg, model_field="saint-auto", messages=first, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=follow, caches=caches)
+    assert mock.call_count == 1
+    assert d1.backend == d2.backend == "cloud-large"   # policy.normal[code,hard]
+    assert d2.classifier_outcome.classifier_used == "inherited"
+
+
+async def test_long_new_message_does_not_inherit():
+    cfg = _cfg()
+    caches = _caches()
+    first = [{"role": "user", "content": "explore the saint-router repo and refactor decide_route"}]
+    follow = first + [{"role": "assistant", "content": "done"},
+                      {"role": "user", "content": "now write me a limerick about routers and their little classifier heads"}]
+    mock = AsyncMock(side_effect=[_payload("code", "hard"), _payload("general", "trivial")])
+    with patch("saint.classifier.call_backend", mock):
+        await decide_route(cfg=cfg, model_field="saint-auto", messages=first, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=follow, caches=caches)
+    assert mock.call_count == 2
+    assert d2.backend == "local-small"
+
+
+async def test_sticky_conversations_inherits_regardless_of_length():
+    from dataclasses import replace
+    cfg = _cfg()
+    cfg = replace(cfg, cache=replace(cfg.cache, sticky_conversations=True))
+    caches = _caches()
+    first = [{"role": "user", "content": "explore the saint-router repo and refactor decide_route"}]
+    follow = first + [{"role": "assistant", "content": "done"},
+                      {"role": "user", "content": "now write me a limerick about routers and their little classifier heads"}]
+    mock = AsyncMock(return_value=_payload("code", "hard"))
+    with patch("saint.classifier.call_backend", mock):
+        await decide_route(cfg=cfg, model_field="saint-auto", messages=first, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=follow, caches=caches)
+    assert mock.call_count == 1
+    assert d2.classifier_outcome.classifier_used == "inherited"
+
+
+async def test_inherited_labels_respect_live_urgency_prefix():
+    cfg = _cfg()
+    caches = _caches()
+    first = [{"role": "user", "content": "explore the saint-router repo and refactor decide_route"}]
+    follow = first + [{"role": "assistant", "content": "done"},
+                      {"role": "user", "content": "!urgent yes do it"}]
+    mock = AsyncMock(return_value=_payload("general", "medium"))
+    with patch("saint.classifier.call_backend", mock):
+        d1 = await decide_route(cfg=cfg, model_field="saint-auto", messages=first, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=follow, caches=caches)
+    assert d1.backend == "local-small"   # policy.normal[general,medium]
+    assert d2.classifier_outcome.classifier_used == "inherited"
+    assert d2.backend == "cloud-small"   # policy.URGENT[general,medium] — urgency stays live
+
+
+async def test_injection_only_message_inherits_instead_of_general_trivial():
+    from dataclasses import replace
+    cfg = _cfg()
+    cfg = replace(cfg, classifier=replace(cfg.classifier, ignore_after=("<memory-context>",)))
+    caches = _caches()
+    first = [{"role": "user", "content": "explore the saint-router repo and refactor decide_route"}]
+    follow = first + [{"role": "assistant", "content": "done"},
+                      {"role": "user", "content": "<memory-context>\nrecalled stuff only"}]
+    mock = AsyncMock(return_value=_payload("code", "hard"))
+    with patch("saint.classifier.call_backend", mock):
+        await decide_route(cfg=cfg, model_field="saint-auto", messages=first, caches=caches)
+        d2 = await decide_route(cfg=cfg, model_field="saint-auto", messages=follow, caches=caches)
+    assert d2.classifier_outcome.classifier_used == "inherited"
+    assert d2.backend == "cloud-large"
+
+
+async def test_no_caches_arg_behaves_as_before():
+    cfg = _cfg()
+    msgs = [{"role": "user", "content": "refactor the parser"}]
+    mock = AsyncMock(return_value=_payload("code", "medium"))
+    with patch("saint.classifier.call_backend", mock):
+        await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs)
+        await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs)
+    assert mock.call_count == 2

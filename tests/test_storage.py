@@ -150,3 +150,54 @@ def test_clear_requests_empty_db(tmp_path):
 
     conn = open_db(tmp_path / "log.sqlite")
     assert clear_requests(conn) == 0
+
+
+def test_schema_v3_fresh_and_upgrade(tmp_path):
+    from saint.storage import SCHEMA_VERSION
+    assert SCHEMA_VERSION == 3
+    conn = open_db(tmp_path / "fresh.sqlite")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    assert {"cache_read_tokens", "cache_write_tokens"} <= cols
+
+    # v2 database with a row upgrades in place, data intact
+    import sqlite3
+    from importlib import resources
+    old = sqlite3.connect(tmp_path / "old.sqlite")
+    for m in ("0001_init.sql", "0002_johnny.sql"):
+        old.executescript(resources.files("saint.migrations").joinpath(m).read_text())
+    old.execute("PRAGMA user_version = 2")
+    old.execute(
+        "INSERT INTO requests (ts, request_id, model_field, urgency_used, backend_chosen,"
+        " success, prompt_storage_mode) VALUES ('t', 'r', 'm', 'normal', 'b', 1, 'full')")
+    old.commit()
+    old.close()
+    conn2 = open_db(tmp_path / "old.sqlite")
+    assert schema_version(conn2) == 3
+    assert conn2.execute("SELECT COUNT(*) FROM requests").fetchone() == (1,)
+
+
+def test_log_row_cache_tokens_roundtrip(tmp_path):
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(cache_read_tokens=8712, cache_write_tokens=130))
+    r = conn.execute("SELECT cache_read_tokens, cache_write_tokens FROM requests").fetchone()
+    assert r == (8712, 130)
+    log_request(conn, _row())  # defaults stay NULL
+    r2 = conn.execute(
+        "SELECT cache_read_tokens, cache_write_tokens FROM requests ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert r2 == (None, None)
+
+
+def test_fetch_training_rows_excludes_reused_labels(tmp_path):
+    from saint.storage import fetch_training_rows
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(request_id="llm", classifier_used="local-chat"))
+    log_request(conn, _row(request_id="head", classifier_used="local-embed (embed-head)",
+                           prompt_content="head-labeled"))
+    log_request(conn, _row(request_id="cache", classifier_used="cache",
+                           prompt_content="cache-labeled"))
+    log_request(conn, _row(request_id="inh", classifier_used="inherited",
+                           prompt_content="inherited-labeled"))
+    rows = fetch_training_rows(conn, limit=100)
+    prompts = [r[0] for r in rows]
+    assert prompts == ["please refactor this"]  # only the LLM-labeled row
