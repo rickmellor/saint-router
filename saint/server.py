@@ -16,6 +16,7 @@ from saint.johnny import build_resolver, provide_telemetry
 from saint.prefixes import UnknownPrefixError
 from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
 from saint.backends import call_embeddings
+from saint.dispatch import BedrockRuntime, dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
 from saint.storage import LogRow, build_log_row, log_request, open_db
 
@@ -82,10 +83,25 @@ def _cache_tokens(usage: dict) -> tuple[int | None, int | None]:
     read = usage.get("cache_read_input_tokens")
     if read is None:
         read = ptd.get("cached_tokens")
+    if read is None:
+        read = usage.get("cacheReadInputTokens")  # Bedrock Converse naming
     write = usage.get("cache_creation_input_tokens")
     if write is None:
         write = ptd.get("cache_creation_tokens")
+    if write is None:
+        write = usage.get("cacheWriteInputTokens")  # Bedrock Converse naming
     return read, write
+
+
+def _provide_telemetry_for(eff, latency_ms, ttft_ms, tokens_in, tokens_out, success):
+    """johnny telemetry when the seat actually served (module-level twin of the chat
+    endpoint's closure, for other endpoints)."""
+    if eff is not None and eff.state_at_dispatch == "johnny_ready" and eff.johnny_seat:
+        provide_telemetry({
+            "seat": eff.johnny_seat, "ts": int(time.time()),
+            "latency_ms": latency_ms, "ttft_ms": ttft_ms,
+            "tokens_in": tokens_in, "tokens_out": tokens_out, "success": success,
+        })
 
 
 def _emit_summary(decision, model_field: str, gen_ms: int,
@@ -169,16 +185,6 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
     return h
 
 
-def _dispatch_candidates(cfg: Config, primary: str, breaker) -> list[str]:
-    """Primary plus its one-hop on_error fallback. The fallback's own on_error is never
-    followed (loop-proof). An open breaker skips the primary when a fallback exists."""
-    fb = cfg.backends[primary].on_error
-    candidates = [primary] + ([fb] if fb and fb != primary else [])
-    if len(candidates) > 1 and breaker.is_open(primary):
-        print(f"[router] breaker open on '{primary}' — dispatching straight to '{fb}'",
-              flush=True)
-        return candidates[1:]
-    return candidates
 
 
 def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
@@ -193,6 +199,10 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                        if cfg.cache.conversation_affinity else None),
     )
     app.state.breaker = Breaker(cfg.routing.breaker_failures, cfg.routing.breaker_cooldown_s)
+    app.state.bedrock_state = BedrockRuntime()
+    if cfg.has_bedrock:
+        from saint.bedrock_auth import apply_bedrock_auth_patch
+        apply_bedrock_auth_patch()
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
@@ -237,7 +247,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             return _explain_response(text, model_field)
 
         breaker = app.state.breaker
-        candidates = _dispatch_candidates(cfg, decision.backend, breaker)
+        candidates = dispatch_candidates(cfg, decision.backend, breaker)
 
         def _provide(eff, latency_ms, ttft_ms, tokens_in, tokens_out, success):
             # Provide telemetry only when the johnny seat actually served the request.
@@ -258,42 +268,31 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
             from saint.router import dispatch_streaming
 
-            # Acquire the stream + first chunk inside the candidate loop: failover is only
-            # possible BEFORE anything is flushed to the client. Mid-stream errors keep the
-            # existing in-stream error-chunk behavior.
+            # Acquire the stream + first chunk inside the attempt: failover is only
+            # possible BEFORE anything is flushed to the client. Mid-stream errors keep
+            # the existing in-stream error-chunk behavior.
             started = time.monotonic()
-            upstream = first_chunk = None
-            eff = served = None
-            error_kind: str | None = None
-            for cand in candidates:
-                eff = resolve_for_dispatch(cfg, cand, app.state.resolver)
-                attempts = 2 if cfg.routing.retry_same_backend else 1
-                for _ in range(attempts):
-                    try:
-                        upstream = await dispatch_streaming(
-                            cfg, decision, messages,
-                            tools=tools, tool_choice=tool_choice,
-                            extra_params=extra or None,
-                            effective_backend=eff.backend,
-                        )
-                        try:
-                            first_chunk = await upstream.__anext__()
-                        except StopAsyncIteration:
-                            first_chunk = None  # empty-but-successful stream
-                        breaker.record_success(cand)
-                        served = cand
-                        break
-                    except Exception as e:
-                        error_kind = type(e).__name__
-                        breaker.record_failure(cand)
-                        print(f"[router] req#{rid}: dispatch to '{cand}' failed "
-                              f"({error_kind}) — {'retrying' if _ == 0 and attempts == 2 else 'moving on'}",
-                              file=sys.stderr, flush=True)
-                        upstream = None
-                if served is not None:
-                    break
 
-            if served is None:
+            async def _attempt_stream(eff_c):
+                upstream_c = await dispatch_streaming(
+                    cfg, decision, messages,
+                    tools=tools, tool_choice=tool_choice,
+                    extra_params=extra or None,
+                    effective_backend=eff_c.backend,
+                )
+                try:
+                    first = await upstream_c.__anext__()
+                except StopAsyncIteration:
+                    first = None  # empty-but-successful stream
+                return upstream_c, first
+
+            result, error_kind, _ = await run_candidates(
+                cfg=cfg, candidates=candidates, rid=rid,
+                resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
+                bedrock_state=app.state.bedrock_state,
+            )
+
+            if result is None:
                 _safe_log(app.state.db, build_log_row(
                     decision=decision, model_field=model_field,
                     backend_latency_ms=int((time.monotonic() - started) * 1000),
@@ -303,8 +302,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 ))
                 raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
 
+            upstream, first_chunk = result.value
             first_chunk_ts = time.monotonic() if first_chunk is not None else None
-            eff_final, served_final = eff, served
+            eff_final, served_final = result.eff, result.backend
 
             async def gen():
                 tokens_in_total = 0
@@ -371,30 +371,22 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                      headers=_route_headers(decision, served_final, eff_final))
 
         started = time.monotonic()
-        response = None
-        eff = served = None
-        error_kind: str | None = None
-        for cand in candidates:
-            eff = resolve_for_dispatch(cfg, cand, app.state.resolver)
-            attempts = 2 if cfg.routing.retry_same_backend else 1
-            for _ in range(attempts):
-                try:
-                    response = await dispatch_non_streaming(
-                        cfg, decision, messages, tools=tools, tool_choice=tool_choice,
-                        extra_params=extra or None, effective_backend=eff.backend,
-                    )
-                    breaker.record_success(cand)
-                    served = cand
-                    break
-                except Exception as e:
-                    error_kind = type(e).__name__
-                    breaker.record_failure(cand)
-                    print(f"[router] req#{rid}: dispatch to '{cand}' failed "
-                          f"({error_kind}) — {'retrying' if _ == 0 and attempts == 2 else 'moving on'}",
-                          file=sys.stderr, flush=True)
-            if served is not None:
-                break
-        success = served is not None
+
+        async def _attempt(eff_c):
+            return await dispatch_non_streaming(
+                cfg, decision, messages, tools=tools, tool_choice=tool_choice,
+                extra_params=extra or None, effective_backend=eff_c.backend,
+            )
+
+        result, error_kind, last_eff = await run_candidates(
+            cfg=cfg, candidates=candidates, rid=rid,
+            resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
+            bedrock_state=app.state.bedrock_state,
+        )
+        success = result is not None
+        served = result.backend if result else None
+        eff = result.eff if result else last_eff
+        response = result.value if result else None
 
         backend_latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -424,6 +416,211 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         payload = response if isinstance(response, dict) else response.model_dump()
         return JSONResponse(content=payload,
                             headers=_route_headers(decision, served, eff))
+
+    @app.post("/v1/messages")
+    async def anthropic_messages_endpoint(request: Request) -> Any:
+        from saint.anthropic_api import (
+            anthropic_error,
+            anthropic_usage,
+            build_dispatch_params,
+            detect_multimodal,
+            last_user_text,
+            messages_model_field,
+            openai_view,
+            strip_prefix_from_messages,
+        )
+        from saint.backends import call_backend_messages
+
+        body = await request.json()
+        client_model = body.get("model") or ""
+        if body.get("max_tokens") is None:
+            return anthropic_error(400, "invalid_request_error", "max_tokens is required")
+        stream = bool(body.get("stream", False))
+
+        session_id = (request.headers.get("x-session-id")
+                      or (body.get("metadata") or {}).get("user_id"))
+        try:
+            decision = await decide_route(
+                cfg=cfg, model_field=messages_model_field(cfg, client_model),
+                messages=openai_view(body),
+                caches=app.state.route_caches, session_id=session_id,
+                multimodal_override=detect_multimodal(body.get("messages", [])),
+            )
+        except UnknownPrefixError as e:
+            return anthropic_error(400, "invalid_request_error", str(e))
+
+        _emit_decision_warnings(decision)
+
+        if decision.mode == "explain":
+            text = format_decision(decision, cfg, resolver=app.state.resolver)
+            return JSONResponse(content={
+                "id": f"msg_{decision.request_id[:12]}", "type": "message",
+                "role": "assistant", "model": client_model,
+                "content": [{"type": "text", "text": text}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            })
+
+        breaker = app.state.breaker
+        candidates = dispatch_candidates(cfg, decision.backend, breaker)
+        params = build_dispatch_params(body)
+        if decision.parsed.raw:  # strip !/@ routing prefixes before the backend sees them
+            params["messages"] = strip_prefix_from_messages(params["messages"],
+                                                            decision.parsed.raw)
+        rid = decision.request_id[:8]
+
+        def _params_for(eff_c):
+            # Signed thinking is HMAC-bound to the minting model; strip on a backend switch.
+            from saint.thinking import should_strip, strip_signed_thinking
+            if should_strip(eff_c.backend.provider or "", decision.prev_backend,
+                            decision.backend):
+                return {**params, "messages": strip_signed_thinking(params["messages"])}
+            return params
+
+        def _refresh_affinity(served: str):
+            # Record the backend that actually minted this turn's thinking, so later
+            # turns (even pinned ones, which decide_route leaves label-less) know the
+            # continuity backend for the thinking-signature guard.
+            caches = app.state.route_caches
+            if not decision.conversation_key or caches.conversations is None:
+                return
+            from saint.route_cache import ConversationEntry
+            entry = caches.conversations.get(decision.conversation_key)
+            if entry is None:
+                caches.conversations.set(decision.conversation_key,
+                                         ConversationEntry(backend=served))
+            elif entry.backend != served:
+                from dataclasses import replace as _replace
+                caches.conversations.set(decision.conversation_key,
+                                         _replace(entry, backend=served))
+
+        def _log_state(eff, served: str) -> str | None:
+            return "dispatch_fallback" if served != decision.backend else eff.state_at_dispatch
+
+        def _log_messages_row(*, served, eff, latency_ms, success, error_kind, usage,
+                              backend_override):
+            _safe_log(app.state.db, build_log_row(
+                decision=decision, model_field=client_model or "anthropic-messages",
+                backend_latency_ms=latency_ms,
+                success=success, error_kind=error_kind,
+                tokens_in=usage.get("input_tokens"),
+                tokens_out=usage.get("output_tokens"),
+                prompt_storage_mode=cfg.logging.prompt_storage,
+                johnny_seat=eff.johnny_seat if eff else None,
+                state_at_dispatch=_log_state(eff, served) if served else None,
+                cache_read_tokens=usage.get("cache_read_input_tokens"),
+                cache_write_tokens=usage.get("cache_creation_input_tokens"),
+                backend_override=backend_override,
+            ))
+
+        started = time.monotonic()
+
+        if stream:
+            from fastapi.responses import StreamingResponse
+
+            from saint.anthropic_api import SseUsageTracker
+
+            async def _attempt_stream(eff_c):
+                upstream_c = await call_backend_messages(eff_c.backend,
+                                                         params=_params_for(eff_c),
+                                                         stream=True)
+                it = upstream_c.__aiter__()
+                try:
+                    first = await it.__anext__()
+                except StopAsyncIteration:
+                    first = None
+                return it, first
+
+            result, error_kind, last_eff = await run_candidates(
+                cfg=cfg, candidates=candidates, rid=rid,
+                resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
+                bedrock_state=app.state.bedrock_state,
+            )
+            if result is None:
+                _log_messages_row(served=None, eff=last_eff,
+                                  latency_ms=int((time.monotonic() - started) * 1000),
+                                  success=False, error_kind=error_kind, usage={},
+                                  backend_override=None)
+                return anthropic_error(502, "api_error", f"backend error: {error_kind}")
+
+            upstream, first_chunk = result.value
+            first_chunk_ts = time.monotonic() if first_chunk is not None else None
+
+            async def gen():
+                tracker = SseUsageTracker()
+                success_local = False
+                error_kind_local: str | None = None
+                try:
+                    if first_chunk is not None:
+                        tracker.feed(first_chunk)
+                        yield first_chunk
+                        async for chunk in upstream:
+                            tracker.feed(chunk)
+                            yield chunk  # relay ORIGINAL bytes untouched
+                    success_local = True
+                except Exception as e:
+                    success_local = False
+                    error_kind_local = type(e).__name__
+                    import json as _json
+                    err = {"type": "error",
+                           "error": {"type": "api_error", "message": str(e)}}
+                    yield f"event: error\ndata: {_json.dumps(err)}\n\n".encode()
+                finally:
+                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                    ttft = (int((first_chunk_ts - started) * 1000)
+                            if first_chunk_ts else None)
+                    if success_local:
+                        _refresh_affinity(result.backend)
+                    _log_messages_row(served=result.backend, eff=result.eff,
+                                      latency_ms=elapsed_ms, success=success_local,
+                                      error_kind=error_kind_local, usage=tracker.usage,
+                                      backend_override=result.backend)
+                    _provide_telemetry_for(result.eff, elapsed_ms, ttft,
+                                           tracker.usage.get("input_tokens"),
+                                           tracker.usage.get("output_tokens"),
+                                           success_local)
+                    _emit_summary(decision, client_model or "anthropic-messages",
+                                  elapsed_ms,
+                                  cache_read=tracker.usage.get("cache_read_input_tokens"),
+                                  cache_write=tracker.usage.get("cache_creation_input_tokens"),
+                                  served=result.backend)
+
+            return StreamingResponse(
+                gen(), media_type="text/event-stream",
+                headers=_route_headers(decision, result.backend, result.eff))
+
+        async def _attempt(eff_c):
+            return await call_backend_messages(eff_c.backend, params=_params_for(eff_c),
+                                               stream=False)
+
+        result, error_kind, last_eff = await run_candidates(
+            cfg=cfg, candidates=candidates, rid=rid,
+            resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
+            bedrock_state=app.state.bedrock_state,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        if result is None:
+            _log_messages_row(served=None, eff=last_eff, latency_ms=latency_ms,
+                              success=False, error_kind=error_kind, usage={},
+                              backend_override=None)
+            return anthropic_error(502, "api_error", f"backend error: {error_kind}")
+
+        usage = anthropic_usage(result.value)
+        _refresh_affinity(result.backend)
+        _log_messages_row(served=result.backend, eff=result.eff, latency_ms=latency_ms,
+                          success=True, error_kind=None, usage=usage,
+                          backend_override=result.backend)
+        _provide_telemetry_for(result.eff, latency_ms, None, usage.get("input_tokens"),
+                               usage.get("output_tokens"), True)
+        _emit_summary(decision, client_model or "anthropic-messages", latency_ms,
+                      cache_read=usage.get("cache_read_input_tokens"),
+                      cache_write=usage.get("cache_creation_input_tokens"),
+                      served=result.backend)
+        payload = (result.value if isinstance(result.value, dict)
+                   else result.value.model_dump())
+        return JSONResponse(content=payload,
+                            headers=_route_headers(decision, result.backend, result.eff))
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Any:

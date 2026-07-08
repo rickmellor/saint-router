@@ -1,0 +1,114 @@
+# SAINT config for a corporate AWS Bedrock deployment (Claude Code + agent clients).
+#
+# Auth is corporate SSO (Azure AD -> Cognito -> STS temp creds) via a credential_process
+# helper under an AWS profile — NO static keys. SAINT holds no secret of its own; the
+# credential patch (applied automatically when a bedrock backend exists) forces boto3
+# through credential_process so tokens auto-refresh. See docs/corp-deployment.md.
+#
+# All four Claude tiers are Bedrock inference profiles. Prices are USD per Mtok — VERIFY
+# against the current Bedrock pricing page before trusting the cost/net-savings numbers
+# (Fable/Mythos-tier pricing especially).
+
+[server]
+host = "127.0.0.1"
+port = 4000
+
+# ---- Bedrock tiers -------------------------------------------------------
+# aliases include the RAW inference-profile ids AND the legacy strings a client's
+# settings.json might still send, so Claude Code's model field pins the right tier
+# before you rename anything.
+
+[backends.bedrock-fable]
+provider    = "bedrock"
+model       = "global.anthropic.claude-fable-5"
+aws_region  = "us-east-1"
+aws_profile = "ClaudeCode"
+aliases     = ["fable", "global.anthropic.claude-fable-5"]
+on_error    = "bedrock-opus"
+timeout_s   = 180
+price_in    = 5.0            # VERIFY
+price_out   = 25.0           # VERIFY
+
+[backends.bedrock-opus]
+provider    = "bedrock"
+model       = "global.anthropic.claude-opus-4-8"
+aws_region  = "us-east-1"
+aws_profile = "ClaudeCode"
+aliases     = ["opus", "global.anthropic.claude-opus-4-8"]
+on_error    = "bedrock-sonnet"
+timeout_s   = 180
+price_in    = 5.0            # VERIFY
+price_out   = 25.0           # VERIFY
+
+[backends.bedrock-sonnet]
+provider    = "bedrock"
+model       = "global.anthropic.claude-sonnet-5"
+aws_region  = "us-east-1"
+aws_profile = "ClaudeCode"
+aliases     = ["sonnet", "global.anthropic.claude-sonnet-5", "us.anthropic.claude-sonnet-4-6"]
+on_error    = "bedrock-haiku"
+timeout_s   = 180
+price_in    = 3.0            # VERIFY
+price_out   = 15.0           # VERIFY
+
+[backends.bedrock-haiku]
+provider    = "bedrock"
+model       = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+aws_region  = "us-east-1"
+aws_profile = "ClaudeCode"
+aliases     = ["haiku", "global.anthropic.claude-haiku-4-5-20251001-v1:0"]
+timeout_s   = 120
+price_in    = 0.8           # VERIFY
+price_out   = 4.0           # VERIFY
+
+# ---- Bedrock SSO recovery ------------------------------------------------
+[bedrock]
+credential_process = "~/claude-code-with-bedrock/credential-process"
+spawn_sso_login    = true    # open a browser tab once per auth-failure event
+sso_check_timeout_s = 8
+auth_cooldown_s    = 120      # shorter than the 300s default → faster recovery after re-auth
+
+# ---- Classifier ----------------------------------------------------------
+# LLM mode: no local embedding seat on the corp box, so classify with the cheapest
+# Bedrock tier. (If you add a local embed seat later, train a head and flip to embedding.)
+[classifier]
+mode             = "llm"
+backend          = "bedrock-haiku"
+max_input_chars  = 8000
+timeout_s        = 15
+ignore_after     = ["\n\n[fabric]", "<memory-context>"]  # extend per client
+
+# ---- Routing -------------------------------------------------------------
+[routing]
+default_urgency    = "normal"
+default_on_failure = "bedrock-sonnet"
+# multimodal_backend = "bedrock-sonnet"   # if you route images
+
+[routing.policy.normal]
+"code,trivial"    = "bedrock-haiku"
+"code,medium"     = "bedrock-sonnet"
+"code,hard"       = "bedrock-fable"
+"general,trivial" = "bedrock-haiku"
+"general,medium"  = "bedrock-sonnet"
+"general,hard"    = "bedrock-fable"
+
+[routing.policy.urgent]
+"code,trivial"    = "bedrock-haiku"
+"code,medium"     = "bedrock-sonnet"
+"code,hard"       = "bedrock-fable"
+"general,trivial" = "bedrock-haiku"
+"general,medium"  = "bedrock-sonnet"
+"general,hard"    = "bedrock-fable"
+
+[routing.policy.patient]
+"code,trivial"    = "bedrock-haiku"
+"code,medium"     = "bedrock-sonnet"
+"code,hard"       = "bedrock-opus"
+"general,trivial" = "bedrock-haiku"
+"general,medium"  = "bedrock-sonnet"
+"general,hard"    = "bedrock-opus"
+
+# ---- Logging -------------------------------------------------------------
+[logging]
+db_path        = "~/.config/saint/log.sqlite"
+prompt_storage = "full"

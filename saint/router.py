@@ -126,6 +126,8 @@ class RoutingDecision:
     model_field: str
     last_user_content_original: str | None
     stripped_last_user: str | None
+    conversation_key: str | None = None      # affinity key (for served-backend refresh + thinking guard)
+    prev_backend: str | None = None          # backend that served this conversation's previous turn
 
 
 def _last_user_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -166,13 +168,15 @@ async def decide_route(
     messages: list[dict[str, Any]],
     caches: RouteCaches | None = None,   # server passes app.state.route_caches; CLI passes nothing
     session_id: str | None = None,       # x-session-id header / session_id body field
+    multimodal_override: bool | None = None,  # /v1/messages supplies Anthropic-aware detection
 ) -> RoutingDecision:
     request_id = str(uuid.uuid4())
 
     mode: Literal["dispatch", "explain"] = "explain" if model_field == SAINT_EXPLAIN else "dispatch"
 
     last_user = _last_user_message(messages)
-    multimodal = bool(last_user and _is_multimodal_content(last_user.get("content")))
+    multimodal = (multimodal_override if multimodal_override is not None
+                  else bool(last_user and _is_multimodal_content(last_user.get("content"))))
     full_text = _content_text(last_user.get("content")) if last_user else None
     # classifier + log view of the message: client-injected context cut off.
     # `full_text` (via parsed.stripped) is what dispatch forwards.
@@ -199,6 +203,18 @@ async def decide_route(
     pinned = parsed.pinned_backend or pinned_via_model
     urgency = parsed.urgency or cfg.routing.default_urgency
 
+    # Conversation key is needed on every path (pinned turns still need served-backend
+    # continuity for the thinking-signature guard); prev_backend is the last served one.
+    conv_key = (
+        conversation_key(messages, session_id)
+        if caches is not None and mode == "dispatch" and caches.conversations is not None
+        else None
+    )
+    conv_entry: ConversationEntry | None = (
+        caches.conversations.get(conv_key) if conv_key else None
+    )
+    prev_backend = conv_entry.backend if conv_entry is not None else None
+
     if multimodal and pinned is None:
         return RoutingDecision(
             request_id=request_id, mode=mode,
@@ -208,6 +224,7 @@ async def decide_route(
             multimodal=True, model_field=model_field,
             last_user_content_original=last_text_original,
             stripped_last_user=None,
+            conversation_key=conv_key, prev_backend=prev_backend,
         )
 
     if pinned is not None:
@@ -218,6 +235,7 @@ async def decide_route(
             multimodal=multimodal, model_field=model_field,
             last_user_content_original=last_text_original,
             stripped_last_user=parsed.stripped if last_text_original is not None else None,
+            conversation_key=conv_key, prev_backend=prev_backend,
         )
 
     clf_input = (
@@ -227,20 +245,15 @@ async def decide_route(
 
     # Routing caches participate only for real dispatches with no pin and no multimodal
     # content (pins/multimodal returned above; explain and CLI paths bypass here).
+    # conv_key/conv_entry/prev_backend were computed above (needed on every path).
     use_caches = caches is not None and mode == "dispatch"
-    conv_key = (
-        conversation_key(messages, session_id)
-        if use_caches and caches.conversations is not None else None
-    )
-    conv_entry: ConversationEntry | None = (
-        caches.conversations.get(conv_key) if conv_key else None
-    )
+    has_labels = conv_entry is not None and conv_entry.labels is not None
 
     outcome: FallbackOutcome | None = None
     labels: CachedLabels | None = None  # canonical labels behind `outcome`, for cache writes
     empty_input = last_user is None or not clf_input.strip()
 
-    if empty_input and conv_entry is None:
+    if empty_input and not has_labels:
         backend = resolve_policy(cfg.routing.policy, urgency, "general", "trivial")
         return RoutingDecision(
             request_id=request_id, mode=mode, backend=backend,
@@ -249,12 +262,13 @@ async def decide_route(
             multimodal=multimodal, model_field=model_field,
             last_user_content_original=last_text_original,
             stripped_last_user=parsed.stripped if full_text is not None else None,
+            conversation_key=conv_key, prev_backend=prev_backend,
         )
 
     # (a) empty input (incl. injection-only after ignore_after) inherits when it can;
     # (b) short follow-ups inherit the conversation's labels instead of classifying
     #     "yes, do that" out of context; sticky_conversations inherits regardless.
-    if conv_entry is not None and (
+    if has_labels and (
         empty_input
         or cfg.cache.sticky_conversations
         or len(clf_input) < cfg.cache.short_follow_up_max_chars
@@ -288,7 +302,7 @@ async def decide_route(
                                   outcome.result.domain, outcome.result.complexity)
         # (e) refresh conversation affinity every successful turn — the sliding TTL.
         if conv_key and labels is not None:
-            caches.conversations.set(conv_key, ConversationEntry(labels=labels, backend=backend))
+            caches.conversations.set(conv_key, ConversationEntry(backend=backend, labels=labels))
     return RoutingDecision(
         request_id=request_id, mode=mode, backend=backend,
         pinned_backend=None, urgency=urgency, parsed=parsed,
@@ -296,6 +310,7 @@ async def decide_route(
         multimodal=multimodal, model_field=model_field,
         last_user_content_original=last_text_original,
         stripped_last_user=parsed.stripped,
+        conversation_key=conv_key, prev_backend=prev_backend,
     )
 
 
@@ -323,7 +338,14 @@ def _prepare_dispatch(
     out_messages = apply_stripping(messages, decision.stripped_last_user)
     backend = effective_backend or cfg.backends[decision.backend]
     out_tools = tools
-    if cfg.cache.anthropic_prompt_caching and backend.provider == "anthropic":
+    # Signed thinking blocks are HMAC-bound to the minting model — strip them when this
+    # turn switched backends (see saint/thinking.py), else the target 400s on the replay.
+    from saint.thinking import should_strip, strip_signed_thinking
+    if should_strip(backend.provider or "", decision.prev_backend, decision.backend):
+        out_messages = strip_signed_thinking(out_messages)
+    # Bedrock Claude models support the same cache_control blocks (Probe C on the corp
+    # box verifies forwarding + usage field names before this ships in anger).
+    if cfg.cache.anthropic_prompt_caching and backend.provider in ("anthropic", "bedrock"):
         out_messages, out_tools = inject_cache_control(
             out_messages, tools,
             min_chars=cfg.cache.prompt_cache_min_chars,
