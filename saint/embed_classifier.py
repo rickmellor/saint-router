@@ -62,9 +62,11 @@ def _softmax(z: np.ndarray) -> np.ndarray:
 
 
 def _fit_softmax(X: np.ndarray, y_idx: np.ndarray, n_classes: int,
-                 l2: float = 1.0, lr: float = 0.5, iters: int = 400) -> tuple[np.ndarray, np.ndarray]:
+                 l2: float = 1.0, lr: float = 0.5, iters: int = 8000) -> tuple[np.ndarray, np.ndarray]:
     """L2-regularized multinomial logistic regression via full-batch gradient descent.
-    Tiny head (dim×classes), tiny data — trains in well under a second."""
+    Tiny head (dim×classes), small data — trains in seconds. Iteration count matters:
+    under-converged heads produce soft probabilities that fail the min_confidence gate
+    and defer everything to the LLM (400 iters halved coverage at 1200 samples)."""
     n, d = X.shape
     W = np.zeros((d, n_classes), dtype=np.float64)
     b = np.zeros(n_classes, dtype=np.float64)
