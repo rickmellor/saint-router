@@ -415,6 +415,7 @@ def classifier_status(
         help="Replay the head against recent LLM-labeled rows (embeds them; a few seconds).",
     ),
     limit: int = typer.Option(200, "--limit", help="Max rows for the --drift comparison."),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output (for monitoring jobs)."),
 ):
     """Show classifier mode, head metadata, live coverage, and (--drift) boundary drift.
 
@@ -422,7 +423,12 @@ def classifier_status(
     Drift: head predictions vs the LLM's labels on recent deferred rows — the boundary
     region where the head declined. Low routing agreement there, or lots of new labeled
     rows since training, means a retrain is worth it.
+
+    --json emits one object with `healthy` (bool) and `suggestions` (list); a monitoring
+    job alerts when healthy is false.
     """
+    import json as _json
+
     from saint import embed_classifier as EC
     from saint.storage import (
         classifier_traffic_mix,
@@ -431,42 +437,53 @@ def classifier_status(
         open_db,
     )
 
+    say = (lambda *a, **k: None) if as_json else print
+    data: dict = {}
+
     cfg = _load_or_die(config)
     path = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
-    print(f"mode              = {cfg.classifier.mode}")
-    print(f"embedding_backend = {cfg.classifier.embedding_backend}")
-    print(f"min_confidence    = {cfg.classifier.min_confidence}")
-    print(f"head_path         = {path}")
+    say(f"mode              = {cfg.classifier.mode}")
+    say(f"embedding_backend = {cfg.classifier.embedding_backend}")
+    say(f"min_confidence    = {cfg.classifier.min_confidence}")
+    say(f"head_path         = {path}")
+    data["mode"] = cfg.classifier.mode
+    data["min_confidence"] = cfg.classifier.min_confidence
     head = None
     if path.exists():
         head = EC.Head.load(path)
-        print(f"trained_at        = {head.trained_at}")
-        print(f"n_samples         = {head.n_samples}")
-        print(f"embed_model       = {head.embed_model}")
-        print(f"dim               = {head.dim}")
-        print(f"domain_classes    = {head.domain_classes}")
-        print(f"complexity_classes= {head.complexity_classes}")
+        say(f"trained_at        = {head.trained_at}")
+        say(f"n_samples         = {head.n_samples}")
+        say(f"embed_model       = {head.embed_model}")
+        say(f"dim               = {head.dim}")
+        say(f"domain_classes    = {head.domain_classes}")
+        say(f"complexity_classes= {head.complexity_classes}")
+        data["head"] = {"trained_at": head.trained_at, "n_samples": head.n_samples,
+                        "embed_model": head.embed_model, "dim": head.dim}
     else:
-        print("head              = (not trained — run `saint classifier train`)")
+        say("head              = (not trained — run `saint classifier train`)")
+        data["head"] = None
 
     conn = open_db(Path(cfg.logging.db_path))
     # Window = routed traffic the CURRENT head has served (since trained_at); explain/
     # seeding rows are excluded so old dataset batches can't taint the stats.
     mix = classifier_traffic_mix(conn, 500, since=head.trained_at if head else None)
     classified = mix["head"] + mix["llm"]
-    print()
+    say()
     window = "routed traffic since head trained" if head else "recent routed traffic"
-    print(f"{window} ({sum(mix.values())} classified rows, explain/seed excluded):")
-    print(f"  head answered   = {mix['head']}")
-    print(f"  llm answered    = {mix['llm']}"
-          + ("  (head deferrals)" if cfg.classifier.mode == "embedding" else ""))
-    print(f"  cache/inherited = {mix['reused']}")
+    say(f"{window} ({sum(mix.values())} classified rows, explain/seed excluded):")
+    say(f"  head answered   = {mix['head']}")
+    say(f"  llm answered    = {mix['llm']}"
+        + ("  (head deferrals)" if cfg.classifier.mode == "embedding" else ""))
+    say(f"  cache/inherited = {mix['reused']}")
+    data["traffic"] = dict(mix)
     if classified:
         coverage = mix["head"] / classified
-        print(f"  head coverage   = {100 * coverage:.0f}% of fresh classifications")
+        say(f"  head coverage   = {100 * coverage:.0f}% of fresh classifications")
+        data["traffic"]["head_coverage"] = round(coverage, 3)
     new_rows = count_training_rows_since(conn, head.trained_at) if head else None
     if new_rows is not None:
-        print(f"  new labeled rows since training = {new_rows}")
+        say(f"  new labeled rows since training = {new_rows}")
+        data["new_labeled_rows_since_training"] = new_rows
 
     suggestions: list[str] = []
     if head is None:
@@ -501,12 +518,13 @@ def classifier_status(
             if len(rows) >= limit:
                 break
         if not rows:
-            print("\ndrift: no LLM-labeled rows since training to compare against")
+            say("\ndrift: no LLM-labeled rows since training to compare against")
+            data["drift"] = None
         else:
             prompts = [r[0] for r in rows]
             small_n = "  (small sample)" if len(rows) < 30 else ""
-            print(f"\ndrift check: replaying head over {len(rows)} LLM-labeled rows "
-                  f"since training…{small_n}")
+            say(f"\ndrift check: replaying head over {len(rows)} LLM-labeled rows "
+                f"since training…{small_n}")
 
             async def _embed():
                 chunks = []
@@ -526,18 +544,30 @@ def classifier_status(
                 got = resolve_policy(cfg.routing.policy, "normal", dl, cl)
                 route_hit += want == got
             n = len(rows)
-            print(f"  domain agreement     = {dom_hit}/{n} ({100 * dom_hit / n:.0f}%)")
-            print(f"  complexity agreement = {cplx_hit}/{n} ({100 * cplx_hit / n:.0f}%)")
-            print(f"  routing agreement    = {route_hit}/{n} ({100 * route_hit / n:.0f}%)"
-                  "  (policy.normal destinations)")
-            print(f"  head now confident on {confident}/{n} ({100 * confident / n:.0f}%) "
-                  "of these (they deferred when served)")
+            say(f"  domain agreement     = {dom_hit}/{n} ({100 * dom_hit / n:.0f}%)")
+            say(f"  complexity agreement = {cplx_hit}/{n} ({100 * cplx_hit / n:.0f}%)")
+            say(f"  routing agreement    = {route_hit}/{n} ({100 * route_hit / n:.0f}%)"
+                "  (policy.normal destinations)")
+            say(f"  head now confident on {confident}/{n} ({100 * confident / n:.0f}%) "
+                "of these (they deferred when served)")
+            data["drift"] = {
+                "sample": n, "small_sample": n < 30,
+                "domain_agreement": round(dom_hit / n, 3),
+                "complexity_agreement": round(cplx_hit / n, 3),
+                "routing_agreement": round(route_hit / n, 3),
+                "now_confident": round(confident / n, 3),
+            }
             if route_hit / n < 0.9:
                 suggestions.append(
                     f"boundary drift: head disagrees with the LLM's routing on "
                     f"{n - route_hit}/{n} recent deferrals — retrain"
                 )
 
+    data["suggestions"] = suggestions
+    data["healthy"] = not suggestions
+    if as_json:
+        print(_json.dumps(data, indent=2))
+        return
     print()
     if suggestions:
         for s in suggestions:
