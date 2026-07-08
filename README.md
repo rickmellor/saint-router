@@ -137,6 +137,25 @@ backend's static `base_url`/`model`. Otherwise the backend serves its **static b
 bound backend), so embedding traffic shares the same endpoint, failover, and accounting
 as chat. Inputs are never stored in the log.
 
+## AWS Bedrock backends + Claude Code
+
+A backend with `provider = "bedrock"` dispatches to a Bedrock inference profile using the
+AWS credential chain (no static keys — `aws_profile` carries the corporate
+`credential_process`/SSO). SAINT auto-applies a credential patch so short-lived SSO tokens
+refresh transparently, classifies AWS auth failures distinctly (force-open the breaker,
+spawn the SSO browser login once, recover via a non-interactive refresh probe on the
+breaker's half-open trial), and derives Bedrock Claude cache prices like Anthropic's.
+
+`POST /v1/messages` speaks the **Anthropic Messages API**, so Claude Code can route through
+SAINT (point `ANTHROPIC_BASE_URL` at it). It uses the same classifier/policy/cache brain
+as chat, forwards the client's own `cache_control` untouched, and strips signed thinking
+blocks when a turn switches backends (their signatures are model-bound and would otherwise
+400 on Bedrock).
+
+See [`docs/corp-deployment.md`](./docs/corp-deployment.md) and
+[`docs/examples/corp-bedrock.toml`](./docs/examples/corp-bedrock.toml) for the full corporate
+setup. Install with the extra: `uv tool install 'saint-router[bedrock]'`.
+
 ## Observability & accounting
 
 Every response carries routing metadata headers — `x-saint-backend`, `x-saint-domain`,
@@ -184,6 +203,8 @@ configure; there is no separate "privacy mode."
 
 ```
 saint serve                               # start the proxy
+                                          #   endpoints: /v1/chat/completions, /v1/messages
+                                          #   (Anthropic/Claude Code), /v1/embeddings
 saint explain "<prompt>" [--test]         # print routing decision; logs the classification
                                           #   as training data unless --test
 saint policy show                         # dump resolved policy tables
