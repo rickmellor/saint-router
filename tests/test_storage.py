@@ -245,3 +245,42 @@ def test_fetch_training_rows_since_filter(tmp_path):
     log_request(conn, _row(classifier_used="local-chat"))
     assert len(fetch_training_rows(conn, 10)) == 1
     assert fetch_training_rows(conn, 10, since="2999-01-01T00:00:00+00:00") == []
+
+
+def test_usage_stats_aggregates_per_backend(tmp_path):
+    from saint.storage import usage_stats
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=1000, tokens_out=100,
+                           cache_read_tokens=800, cache_write_tokens=100))
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=2000, tokens_out=200,
+                           cache_read_tokens=None, cache_write_tokens=None))
+    log_request(conn, _row(backend_chosen="local-coder", tokens_in=500, tokens_out=50,
+                           success=False))
+    log_request(conn, _row(backend_chosen="cloud-large", model_field="saint-explain"))  # excluded
+    stats = {s["backend_chosen"]: s for s in usage_stats(conn, "2000-01-01")}
+    cl = stats["cloud-large"]
+    assert cl["requests"] == 2 and cl["ok"] == 2
+    assert cl["tokens_in"] == 3000 and cl["tokens_out"] == 300
+    assert cl["cache_read"] == 800 and cl["cache_write"] == 100
+    lc = stats["local-coder"]
+    assert lc["requests"] == 1 and lc["ok"] == 0
+
+
+def test_prune_keeps_training_rows_by_default(tmp_path):
+    from saint.storage import prune_requests
+    conn = open_db(tmp_path / "log.sqlite")
+    log_request(conn, _row(request_id="train", classifier_used="local-chat",
+                           prompt_content="labeled prompt"))
+    log_request(conn, _row(request_id="cache", classifier_used="cache",
+                           prompt_content="reused prompt"))
+    conn.execute("UPDATE requests SET ts = '2000-01-01T00:00:00+00:00'")  # backdate all
+    log_request(conn, _row(request_id="fresh", classifier_used="cache",
+                           prompt_content="new reused"))
+    cutoff = "2020-01-01T00:00:00+00:00"
+    assert prune_requests(conn, cutoff) == 1  # old cache row goes, training row stays
+    remaining = {r[0] for r in conn.execute("SELECT request_id FROM requests")}
+    assert remaining == {"train", "fresh"}
+    # --no-keep-training removes the old training row too
+    assert prune_requests(conn, cutoff, keep_training=False) == 1
+    remaining = {r[0] for r in conn.execute("SELECT request_id FROM requests")}
+    assert remaining == {"fresh"}

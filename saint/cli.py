@@ -270,6 +270,136 @@ def log_clear(
     print(f"Deleted {deleted} rows; ids restart at 1.")
 
 
+def _effective_prices(b) -> dict | None:
+    """Backend pricing (USD/Mtok) with anthropic cache-price derivation (0.1x read,
+    1.25x write of price_in). None when no price_in is set (cost columns stay blank)."""
+    if b.price_in is None:
+        return None
+    is_anthropic = b.provider == "anthropic"
+    return {
+        "in": b.price_in,
+        "out": b.price_out if b.price_out is not None else 0.0,
+        "cache_read": (b.price_cache_read if b.price_cache_read is not None
+                       else (0.1 * b.price_in if is_anthropic else 0.0)),
+        "cache_write": (b.price_cache_write if b.price_cache_write is not None
+                        else (1.25 * b.price_in if is_anthropic else 0.0)),
+    }
+
+
+@log_app.command("stats")
+def log_stats(
+    days: float = typer.Option(7.0, "--days", "-d", help="Window in days."),
+    config: Path | None = typer.Option(None),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+):
+    """Per-backend usage and cost accounting, including the prompt-cache advantage.
+
+    est cost      = uncached_in*price_in + reads*cache_read_price + writes*cache_write_price + out*price_out
+    no-cache cost = tokens_in*price_in + out*price_out
+    cache adv.    = no-cache - est  (negative when cache writes outweighed reads)
+    Backends without price_in show token counts only. Local seats: set prices to 0
+    (or leave unset) — their cost is electricity, not tokens."""
+    import json as _json
+    from datetime import UTC, datetime, timedelta
+
+    from saint.storage import open_db, usage_stats
+
+    cfg = _load_or_die(config)
+    conn = open_db(Path(cfg.logging.db_path))
+    since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    rows = usage_stats(conn, since)
+
+    out_rows = []
+    for r in rows:
+        b = cfg.backends.get(r["backend_chosen"])
+        prices = _effective_prices(b) if b else None
+        entry = {
+            "backend": r["backend_chosen"],
+            "requests": r["requests"], "ok": r["ok"], "fail": r["requests"] - r["ok"],
+            "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
+            "cache_read": r["cache_read"], "cache_write": r["cache_write"],
+            "avg_latency_ms": round(r["avg_latency_ms"]) if r["avg_latency_ms"] else None,
+            "est_cost": None, "no_cache_cost": None, "cache_advantage": None,
+        }
+        if prices:
+            uncached_in = max(r["tokens_in"] - r["cache_read"] - r["cache_write"], 0)
+            est = (uncached_in * prices["in"] + r["cache_read"] * prices["cache_read"]
+                   + r["cache_write"] * prices["cache_write"]
+                   + r["tokens_out"] * prices["out"]) / 1e6
+            nocache = (r["tokens_in"] * prices["in"] + r["tokens_out"] * prices["out"]) / 1e6
+            entry["est_cost"] = round(est, 4)
+            entry["no_cache_cost"] = round(nocache, 4)
+            entry["cache_advantage"] = round(nocache - est, 4)
+        out_rows.append(entry)
+
+    priced = [e for e in out_rows if e["est_cost"] is not None]
+    totals = {
+        "requests": sum(e["requests"] for e in out_rows),
+        "est_cost": round(sum(e["est_cost"] for e in priced), 4) if priced else None,
+        "cache_advantage": (round(sum(e["cache_advantage"] for e in priced), 4)
+                            if priced else None),
+    }
+
+    if as_json:
+        print(_json.dumps({"window_days": days, "since": since,
+                           "backends": out_rows, "totals": totals}, indent=2))
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    t = Table(title=f"saint usage — last {days:g} day(s)")
+    for col in ("backend", "req (ok/fail)", "tok in", "tok out",
+                "pc read", "pc write", "avg ms", "est cost", "no-cache", "cache adv."):
+        t.add_column(col, justify="right" if col != "backend" else "left")
+    for e in out_rows:
+        fmt = lambda v: f"${v:.2f}" if v is not None else "—"
+        t.add_row(
+            e["backend"], f"{e['requests']} ({e['ok']}/{e['fail']})",
+            f"{e['tokens_in']:,}", f"{e['tokens_out']:,}",
+            f"{e['cache_read']:,}", f"{e['cache_write']:,}",
+            str(e["avg_latency_ms"] or "—"),
+            fmt(e["est_cost"]), fmt(e["no_cache_cost"]), fmt(e["cache_advantage"]),
+        )
+    Console().print(t)
+    if totals["est_cost"] is not None:
+        adv = totals["cache_advantage"]
+        direction = "saved" if adv >= 0 else "LOST (writes outweighed reads)"
+        typer.secho(f"total est cost ${totals['est_cost']:.2f} — prompt caching "
+                    f"{direction} ${abs(adv):.2f}",
+                    fg=typer.colors.GREEN if adv >= 0 else typer.colors.YELLOW)
+
+
+@log_app.command("prune")
+def log_prune(
+    days: float = typer.Option(30.0, "--days", "-d", help="Delete rows older than this."),
+    keep_training: bool = typer.Option(
+        True, "--keep-training/--no-keep-training",
+        help="Preserve rows the classifier trainer can still use (default: keep)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    config: Path | None = typer.Option(None),
+):
+    """Age out old request log rows (training-usable rows are kept by default)."""
+    from datetime import UTC, datetime, timedelta
+
+    from saint.storage import open_db, prune_requests
+
+    cfg = _load_or_die(config)
+    conn = open_db(Path(cfg.logging.db_path))
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    (count,) = conn.execute("SELECT COUNT(*) FROM requests WHERE ts < ?", (cutoff,)).fetchone()
+    if count == 0:
+        print(f"Nothing older than {days:g} day(s).")
+        return
+    scope = "non-training rows" if keep_training else "ALL rows (including training data)"
+    if not yes:
+        typer.confirm(f"Prune {scope} older than {days:g} day(s) "
+                      f"(up to {count} candidates)?", abort=True)
+    deleted = prune_requests(conn, cutoff, keep_training=keep_training)
+    print(f"Pruned {deleted} rows (kept {count - deleted} older rows"
+          f"{' as training data' if keep_training else ''}).")
+
+
 relabel_app = typer.Typer(help="Mark requests with corrected backend.")
 app.add_typer(relabel_app, name="relabel")
 
