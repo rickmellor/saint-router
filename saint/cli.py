@@ -359,15 +359,10 @@ def classifier_train(
         raise typer.Exit(2)
     embed_backend = cfg.backends[eb_name]
 
+    from saint.storage import fetch_training_rows
+
     conn = open_db(Path(cfg.logging.db_path))
-    rows = conn.execute(
-        "SELECT prompt_content, classifier_domain, classifier_complexity FROM requests "
-        "WHERE prompt_content IS NOT NULL AND classifier_domain IS NOT NULL "
-        "AND classifier_complexity IS NOT NULL "
-        "AND (classifier_used IS NULL OR classifier_used NOT LIKE '%embed-head%') "
-        "ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+    rows = fetch_training_rows(conn, limit)
     seen: set[str] = set()
     prompts: list[str] = []
     doms: list[str] = []
