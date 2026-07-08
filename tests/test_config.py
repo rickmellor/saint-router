@@ -300,3 +300,60 @@ def test_hardening_knobs_parse_and_validate(tmp_path):
     p3 = tmp_path / "bad3.toml"; p3.write_text(bad3)
     with pytest.raises(ValueError, match="embeddings_backend 'ghost'"):
         load_config(p3)
+
+
+def _bedrock_block(extra: str = "") -> str:
+    return f"""
+[backends.bedrock-sonnet]
+provider = "bedrock"
+model = "global.anthropic.claude-sonnet-5"
+aws_region = "us-east-1"
+aws_profile = "ClaudeCode"
+drop_params = ["temperature"]
+default_max_tokens = 8192
+{extra}
+[bedrock]
+credential_process = "~/cc-bedrock/credential-process"
+"""
+
+
+def test_bedrock_backend_parses(tmp_path):
+    from saint.config import load_config
+    cfg = load_config(_write_cfg_with_cache(tmp_path, _bedrock_block()))
+    b = cfg.backends["bedrock-sonnet"]
+    assert b.provider == "bedrock" and b.aws_region == "us-east-1"
+    assert b.aws_profile == "ClaudeCode"
+    assert b.drop_params == ("temperature",)
+    assert b.default_max_tokens == 8192
+    assert cfg.has_bedrock is True
+    assert cfg.bedrock.credential_process.endswith("cc-bedrock/credential-process")
+    assert cfg.bedrock.spawn_sso_login is True
+    assert cfg.bedrock.auth_cooldown_s == 300.0
+
+
+def test_bedrock_validation_matrix(tmp_path):
+    import pytest
+    from saint.config import load_config
+
+    def _try(block, match):
+        p = tmp_path / f"c{abs(hash(match))}.toml"
+        p.write_text(_write_cfg_with_cache(tmp_path, "").read_text() + block)
+        with pytest.raises(ValueError, match=match):
+            load_config(p)
+
+    _try('\n[backends.b1]\nprovider = "bedrock"\nmodel = "m"\n', "requires aws_region")
+    _try('\n[backends.b2]\nprovider = "bedrock"\nmodel = "m"\naws_region = "us-east-1"\n'
+         'api_key = "x"\n', "must not set api_key")
+    _try('\n[backends.b3]\nprovider = "bedrock"\nmodel = "m"\naws_region = "us-east-1"\n'
+         'base_url = "http://x"\n', "must not set base_url")
+    # aws fields on a non-bedrock backend
+    _try('\n[backends.b5]\nprovider = "openai"\nmodel = "m"\nbase_url = "http://x"\n'
+         'api_key = "k"\naws_region = "us-east-1"\n', "bedrock only")
+    _try(_bedrock_block().replace('credential_process = "~/cc-bedrock/credential-process"',
+                                  "auth_cooldown_s = 0"), "auth_cooldown_s")
+
+
+def test_no_bedrock_stays_inert(tmp_path):
+    from saint.config import load_config
+    cfg = load_config(_write_cfg_with_cache(tmp_path, ""))
+    assert cfg.has_bedrock is False and cfg.bedrock is None

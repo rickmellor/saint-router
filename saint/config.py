@@ -33,6 +33,12 @@ class BackendConfig:
     johnny_only: bool = False           # no usable static baseline (may omit base_url/model)
     while_loading: str | None = None    # per-backend override of the warm-up target
     on_error: str | None = None         # dispatch-failure fallback backend (one hop, never chained)
+    # --- provider = "bedrock" only (validated) ---
+    aws_region: str | None = None       # REQUIRED for bedrock backends
+    aws_profile: str | None = None      # AWS profile (credential_process/SSO); omit = default chain
+    # --- request shaping (any provider) ---
+    drop_params: tuple[str, ...] = ()   # strip these params before dispatch (e.g. models that 400 on temperature)
+    default_max_tokens: int | None = None  # injected only when the client omitted max_tokens
     # optional pricing (USD per million tokens) for `saint log stats`; for anthropic
     # backends missing cache prices derive as 0.1x / 1.25x of price_in
     price_in: float | None = None
@@ -47,6 +53,18 @@ class BackendConfig:
     @property
     def johnny_target(self) -> str | None:
         return self.johnny_role or self.johnny_seat
+
+
+@dataclass(frozen=True)
+class BedrockConfig:
+    """SSO credential recovery for bedrock backends (all optional — without this block
+    bedrock backends still work via the standard AWS credential chain, but SAINT cannot
+    probe or re-prompt SSO on auth failures)."""
+
+    credential_process: str | None = None  # the SSO credential helper binary
+    spawn_sso_login: bool = True           # open a browser tab once per auth-failure event
+    sso_check_timeout_s: float = 8.0       # --refresh-if-needed probe timeout
+    auth_cooldown_s: float = 300.0         # breaker cooldown for classified AUTH failures
 
 
 @dataclass(frozen=True)
@@ -124,6 +142,11 @@ class Config:
     logging: LoggingConfig
     johnny: JohnnyConfig | None = None  # present iff any backend is johnny-bound
     cache: CacheConfig = CacheConfig()
+    bedrock: BedrockConfig | None = None  # SSO recovery knobs; optional
+
+    @property
+    def has_bedrock(self) -> bool:
+        return any(b.provider == "bedrock" for b in self.backends.values())
 
 
 def _expand(value: str) -> str:
@@ -250,6 +273,27 @@ def _validate(cfg: Config) -> list[str]:
             v = getattr(b, pf)
             if v is not None and v < 0:
                 errors.append(f"backend '{name}' {pf} must be >= 0")
+        if b.provider == "bedrock":
+            if not b.aws_region:
+                errors.append(f"backend '{name}' (bedrock) requires aws_region")
+            if b.api_key or b.api_key_env:
+                errors.append(f"backend '{name}' (bedrock) must not set api_key/api_key_env "
+                              "(auth comes from the AWS credential chain)")
+            if b.base_url:
+                errors.append(f"backend '{name}' (bedrock) must not set base_url")
+            if b.johnny_bound:
+                errors.append(f"backend '{name}' (bedrock) cannot be johnny-bound")
+        else:
+            if b.aws_region or b.aws_profile:
+                errors.append(f"backend '{name}' sets aws_region/aws_profile but provider "
+                              f"is '{b.provider}' (bedrock only)")
+        if b.default_max_tokens is not None and b.default_max_tokens < 1:
+            errors.append(f"backend '{name}' default_max_tokens must be >= 1")
+    if cfg.bedrock is not None:
+        if cfg.bedrock.sso_check_timeout_s <= 0:
+            errors.append("bedrock.sso_check_timeout_s must be > 0")
+        if cfg.bedrock.auth_cooldown_s <= 0:
+            errors.append("bedrock.auth_cooldown_s must be > 0")
 
     # --- cache knobs ---
     c = cfg.cache
@@ -308,6 +352,11 @@ def load_config(path: Path) -> Config:
             johnny_only=bool(b.get("johnny_only", False)),
             while_loading=b.get("while_loading"),
             on_error=b.get("on_error"),
+            aws_region=b.get("aws_region"),
+            aws_profile=b.get("aws_profile"),
+            drop_params=tuple(b.get("drop_params", ())),
+            default_max_tokens=(int(b["default_max_tokens"])
+                                if b.get("default_max_tokens") is not None else None),
             price_in=float(b["price_in"]) if b.get("price_in") is not None else None,
             price_out=float(b["price_out"]) if b.get("price_out") is not None else None,
             price_cache_read=(float(b["price_cache_read"])
@@ -382,6 +431,17 @@ def load_config(path: Path) -> Config:
         anthropic_cache_ttl=None if cache_ttl in (None, "5m") else cache_ttl,
     )
 
+    br_raw = raw.get("bedrock")
+    bedrock = None
+    if br_raw is not None:
+        bedrock = BedrockConfig(
+            credential_process=(_expand(br_raw["credential_process"])
+                                if br_raw.get("credential_process") else None),
+            spawn_sso_login=bool(br_raw.get("spawn_sso_login", True)),
+            sso_check_timeout_s=float(br_raw.get("sso_check_timeout_s", 8.0)),
+            auth_cooldown_s=float(br_raw.get("auth_cooldown_s", 300.0)),
+        )
+
     cfg = Config(
         server=server,
         backends=backends,
@@ -390,6 +450,7 @@ def load_config(path: Path) -> Config:
         logging=logging_cfg,
         johnny=johnny,
         cache=cache,
+        bedrock=bedrock,
     )
     errors = _validate(cfg)
     if errors:
