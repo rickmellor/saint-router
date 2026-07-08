@@ -368,3 +368,16 @@ async def test_no_caches_arg_behaves_as_before():
         await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs)
         await decide_route(cfg=cfg, model_field="saint-auto", messages=msgs)
     assert mock.call_count == 2
+
+
+async def test_multimodal_backend_knob():
+    from dataclasses import replace
+    cfg = _cfg()
+    mm_msg = [{"role": "user", "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "data:..."}}]}]
+    d1 = await decide_route(cfg=cfg, model_field="saint-auto", messages=mm_msg)
+    assert d1.backend == "cloud-large"  # default_on_failure when knob unset
+    cfg2 = replace(cfg, routing=replace(cfg.routing, multimodal_backend="local-coder"))
+    d2 = await decide_route(cfg=cfg2, model_field="saint-auto", messages=mm_msg)
+    assert d2.backend == "local-coder"

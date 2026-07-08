@@ -32,6 +32,13 @@ class BackendConfig:
     johnny_seat: str | None = None
     johnny_only: bool = False           # no usable static baseline (may omit base_url/model)
     while_loading: str | None = None    # per-backend override of the warm-up target
+    on_error: str | None = None         # dispatch-failure fallback backend (one hop, never chained)
+    # optional pricing (USD per million tokens) for `saint log stats`; for anthropic
+    # backends missing cache prices derive as 0.1x / 1.25x of price_in
+    price_in: float | None = None
+    price_out: float | None = None
+    price_cache_read: float | None = None
+    price_cache_write: float | None = None
 
     @property
     def johnny_bound(self) -> bool:
@@ -73,6 +80,11 @@ class RoutingConfig:
     default_on_failure: str
     policy: dict[str, dict[str, str]]  # policy[urgency][f"{domain},{complexity}"] = backend_name
     while_loading: str | None = None   # global warm-up target while a bound seat loads
+    multimodal_backend: str | None = None   # image/audio-bearing requests (else default_on_failure)
+    embeddings_backend: str | None = None   # serves /v1/embeddings (unset = endpoint disabled)
+    retry_same_backend: bool = True    # one immediate retry before the on_error hop
+    breaker_failures: int = 3          # consecutive dispatch failures to open the circuit
+    breaker_cooldown_s: float = 60.0   # how long an open circuit skips the primary
 
 
 @dataclass(frozen=True)
@@ -221,6 +233,23 @@ def _validate(cfg: Config) -> list[str]:
         errors.append(
             f"routing.while_loading '{cfg.routing.while_loading}' is not defined in [backends]"
         )
+    for field in ("multimodal_backend", "embeddings_backend"):
+        target = getattr(cfg.routing, field)
+        if target and target not in backend_names:
+            errors.append(f"routing.{field} '{target}' is not defined in [backends]")
+    if cfg.routing.breaker_failures < 1:
+        errors.append("routing.breaker_failures must be >= 1")
+    if cfg.routing.breaker_cooldown_s <= 0:
+        errors.append("routing.breaker_cooldown_s must be > 0")
+    for name, b in cfg.backends.items():
+        if b.on_error and b.on_error not in backend_names:
+            errors.append(f"backend '{name}' on_error '{b.on_error}' is not defined in [backends]")
+        if b.on_error == name:
+            errors.append(f"backend '{name}' on_error must not point at itself")
+        for pf in ("price_in", "price_out", "price_cache_read", "price_cache_write"):
+            v = getattr(b, pf)
+            if v is not None and v < 0:
+                errors.append(f"backend '{name}' {pf} must be >= 0")
 
     # --- cache knobs ---
     c = cfg.cache
@@ -278,6 +307,13 @@ def load_config(path: Path) -> Config:
             johnny_seat=b.get("johnny_seat"),
             johnny_only=bool(b.get("johnny_only", False)),
             while_loading=b.get("while_loading"),
+            on_error=b.get("on_error"),
+            price_in=float(b["price_in"]) if b.get("price_in") is not None else None,
+            price_out=float(b["price_out"]) if b.get("price_out") is not None else None,
+            price_cache_read=(float(b["price_cache_read"])
+                              if b.get("price_cache_read") is not None else None),
+            price_cache_write=(float(b["price_cache_write"])
+                               if b.get("price_cache_write") is not None else None),
         )
 
     cls_raw = raw["classifier"]
@@ -306,6 +342,11 @@ def load_config(path: Path) -> Config:
             for urgency, cells in routing_raw.get("policy", {}).items()
         },
         while_loading=routing_raw.get("while_loading"),
+        multimodal_backend=routing_raw.get("multimodal_backend"),
+        embeddings_backend=routing_raw.get("embeddings_backend"),
+        retry_same_backend=bool(routing_raw.get("retry_same_backend", True)),
+        breaker_failures=int(routing_raw.get("breaker_failures", 3)),
+        breaker_cooldown_s=float(routing_raw.get("breaker_cooldown_s", 60.0)),
     )
 
     j_raw = raw.get("johnny")

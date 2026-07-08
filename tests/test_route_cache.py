@@ -142,3 +142,30 @@ def test_inject_one_hour_ttl_propagates():
     messages = [{"role": "user", "content": _big("x")}]
     out, _ = inject_cache_control(messages, None, min_chars=100, ttl="1h")
     assert out[0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+# --- Breaker ---
+def test_breaker_opens_after_threshold_and_resets(monkeypatch):
+    from saint.route_cache import Breaker
+    clock = [0.0]
+    monkeypatch.setattr("saint.route_cache.time.monotonic", lambda: clock[0])
+    b = Breaker(threshold=3, cooldown_s=60)
+    b.record_failure("x"); b.record_failure("x")
+    assert not b.is_open("x")
+    b.record_failure("x")
+    assert b.is_open("x")
+    b.record_success("x")
+    assert not b.is_open("x")
+
+
+def test_breaker_half_open_after_cooldown(monkeypatch):
+    from saint.route_cache import Breaker
+    clock = [0.0]
+    monkeypatch.setattr("saint.route_cache.time.monotonic", lambda: clock[0])
+    b = Breaker(threshold=2, cooldown_s=60)
+    b.record_failure("x"); b.record_failure("x")
+    assert b.is_open("x")
+    clock[0] += 61
+    assert not b.is_open("x")   # half-open: one try allowed
+    b.record_failure("x")       # single failure re-opens (counter primed)
+    assert b.is_open("x")

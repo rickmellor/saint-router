@@ -286,3 +286,44 @@ def test_cli_relabel_undefined_backend_rejected(tmp_path):
                                      "--config", str(cfg_path)])
     assert r.exit_code != 0
     assert "phantom" in r.output
+
+
+def test_cli_log_stats_cost_and_cache_advantage(tmp_path):
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_text = SAMPLE_CFG.format(db=db_path.as_posix()).replace(
+        'model = "claude-opus-4-7"',
+        'model = "claude-opus-4-7"\nprice_in = 10.0\nprice_out = 50.0')
+    cfg_path.write_text(cfg_text)
+
+    from tests.test_storage import _row
+    from saint.storage import log_request, open_db
+    conn = open_db(db_path)
+    # 1M in / 100k out, 800k cache reads, 300k cache writes (write-heavy: negative advantage)
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=1_000_000,
+                           tokens_out=100_000, cache_read_tokens=800_000,
+                           cache_write_tokens=300_000))
+    conn.close()
+
+    from typer.testing import CliRunner
+    from saint import cli as cli_mod
+    import json as _json
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["log", "stats", "--json", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    row = next(b for b in data["backends"] if b["backend"] == "cloud-large")
+    # anthropic derivation: read 1.0/Mtok (0.1x), write 12.5/Mtok (1.25x)
+    # est  = 0*10 + 0.8*1 + 0.3*12.5 + 0.1*50 = 9.55 ; no-cache = 1*10 + 0.1*50 = 15.0
+    assert row["est_cost"] == 9.55
+    assert row["no_cache_cost"] == 15.0
+    assert row["cache_advantage"] == 5.45
+    # write-only day: advantage goes negative (the "or lack thereof")
+    conn = open_db(db_path)
+    log_request(conn, _row(backend_chosen="cloud-large", tokens_in=100_000, tokens_out=0,
+                           cache_read_tokens=0, cache_write_tokens=100_000))
+    conn.close()
+    result2 = runner.invoke(cli_mod.app, ["log", "stats", "--json", "--config", str(cfg_path)])
+    row2 = next(b for b in _json.loads(result2.output)["backends"] if b["backend"] == "cloud-large")
+    # extra request: est += 0.1*12.5 = 1.25 ; no-cache += 0.1*10 = 1.0 → advantage 5.45 - 0.25
+    assert row2["cache_advantage"] == 5.2

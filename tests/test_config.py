@@ -276,3 +276,27 @@ def test_cache_config_validation_errors(tmp_path):
         load_config(_write_cfg_with_cache(tmp_path, '[cache]\nanthropic_cache_ttl = "2h"\n'))
     with pytest.raises(ValueError, match="short_follow_up_max_chars"):
         load_config(_write_cfg_with_cache(tmp_path, "[cache]\nshort_follow_up_max_chars = -1\n"))
+
+
+def test_hardening_knobs_parse_and_validate(tmp_path):
+    import pytest
+    from saint.config import load_config
+    cfg = load_config(_write_cfg_with_cache(tmp_path, ""))
+    assert cfg.routing.retry_same_backend is True
+    assert cfg.routing.breaker_failures == 3
+    assert cfg.routing.multimodal_backend is None
+    # unknown fallback / self-referential on_error / bad prices / unknown embeddings backend
+    base = _write_cfg_with_cache(tmp_path, "").read_text()
+    bad1 = base.replace('[backends.local-small]', '[backends.local-small]\non_error = "nope"')
+    p = tmp_path / "bad1.toml"; p.write_text(bad1)
+    with pytest.raises(ValueError, match="on_error 'nope'"):
+        load_config(p)
+    bad2 = base.replace('[backends.local-small]', '[backends.local-small]\nprice_in = -1')
+    p2 = tmp_path / "bad2.toml"; p2.write_text(bad2)
+    with pytest.raises(ValueError, match="price_in"):
+        load_config(p2)
+    bad3 = base + '\n'  # append to [logging]-terminated file is fine for TOML? use routing key
+    bad3 = base.replace('[routing]', '[routing]\nembeddings_backend = "ghost"')
+    p3 = tmp_path / "bad3.toml"; p3.write_text(bad3)
+    with pytest.raises(ValueError, match="embeddings_backend 'ghost'"):
+        load_config(p3)

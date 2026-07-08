@@ -43,8 +43,13 @@ api_key      = "local"
 aliases      = ["coder"]
 timeout_s    = 180
 johnny_role  = "coder"
+on_error     = "local-chat"                   # dispatch-failure fallback: one hop, never chained
 # while_loading = "cloud-small"               # per-backend warm-up target (else [routing].while_loading)
 # Use johnny_seat = "<seat>" instead of johnny_role to bind a specific seat by name.
+# Optional pricing (USD per Mtok) powers `saint log stats` cost + cache-advantage columns.
+# Anthropic backends derive missing cache prices as 0.1x (read) / 1.25x (write) of price_in.
+# price_in = 5.0
+# price_out = 25.0
 
 [backends.local-chat]
 provider     = "openai"
@@ -107,6 +112,11 @@ default_on_failure = "cloud-large"    # last-resort backend if classifier and fa
                                       # Set to a local backend if running offline-only.
 while_loading      = "cloud-small"    # serve here while a johnny-bound seat warms up (a *normal*
                                       # state on a reaped box — distinct from default_on_failure).
+# multimodal_backend = "local-vision" # image/audio requests (unset → default_on_failure)
+embeddings_backend = "local-embed"    # serves /v1/embeddings through the router (unset = disabled)
+retry_same_backend = true             # one immediate retry before the on_error hop
+breaker_failures   = 3                # consecutive dispatch failures that open a backend's circuit
+breaker_cooldown_s = 60               # open circuit skips the primary for this long
 
 [routing.policy.normal]
 "code,trivial"    = "local-coder"
