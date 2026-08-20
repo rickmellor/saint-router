@@ -142,6 +142,15 @@ class CacheConfig:
 
 
 @dataclass(frozen=True)
+class EnergyConfig:
+    """Electricity-cost inputs for pricing local seats in /status. Local seats carry no API
+    charge, but they burn power; combined with a seat's tok/s this yields a real $/Mtok."""
+    price_kwh: float = 0.36       # USD per kWh
+    host_watts: float = 1500.0    # whole vLLM host at full load (incl. all GPUs)
+    gpu_watts: float = 300.0      # per-GPU at full load
+
+
+@dataclass(frozen=True)
 class Config:
     server: ServerConfig
     backends: dict[str, BackendConfig]
@@ -151,6 +160,7 @@ class Config:
     johnny: JohnnyConfig | None = None  # present iff any backend is johnny-bound
     cache: CacheConfig = CacheConfig()
     bedrock: BedrockConfig | None = None  # SSO recovery knobs; optional
+    energy: EnergyConfig = EnergyConfig()
 
     @property
     def has_bedrock(self) -> bool:
@@ -486,6 +496,13 @@ def load_config(path: Path) -> Config:
             auth_cooldown_s=float(br_raw.get("auth_cooldown_s", 300.0)),
         )
 
+    en_raw = raw.get("energy", {})
+    energy = EnergyConfig(
+        price_kwh=float(en_raw.get("price_kwh", 0.36)),
+        host_watts=float(en_raw.get("host_watts", 1500.0)),
+        gpu_watts=float(en_raw.get("gpu_watts", 300.0)),
+    )
+
     cfg = Config(
         server=server,
         backends=backends,
@@ -495,6 +512,7 @@ def load_config(path: Path) -> Config:
         johnny=johnny,
         cache=cache,
         bedrock=bedrock,
+        energy=energy,
     )
     errors = _validate(cfg)
     if errors:

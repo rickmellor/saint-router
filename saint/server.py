@@ -242,15 +242,35 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         # johnny inventory (best-effort): model -> {context, state} + the active profile
         inv: dict[str, dict[str, Any]] = {}
         profile = None
+        all_gpus: set = set()
         try:
             p = _sp.run(["johnny", "status", "--json"], capture_output=True, text=True, timeout=5)
             if p.returncode == 0:
                 jd = _json.loads(p.stdout)
                 profile = jd.get("profile")
                 for s in jd.get("seats", []):
+                    all_gpus.update(s.get("gpus") or [])
                     if s.get("model"):
                         inv[s["model"]] = {"context": s.get("native_context"),
-                                           "state": s.get("state")}
+                                           "state": s.get("state"), "gpus": s.get("gpus") or []}
+        except Exception:
+            pass
+
+        # Electricity pricing for local seats: seat_watts × $/kWh ÷ (tok/s × 3.6) = $/Mtok.
+        # seat_watts = its GPUs at full load + a per-seat share of the host's non-GPU base.
+        # tok/s is measured from SAINT's own request log (johnny-bench perf could override once
+        # populated). Inputs live in [energy] config — nothing hardcoded.
+        en = cfg.energy
+        total_gpus = len(all_gpus) or 1
+        host_base = max(0.0, en.host_watts - total_gpus * en.gpu_watts)
+        measured: dict[str, float] = {}
+        try:
+            for bk, ts in app.state.db.execute(
+                "SELECT backend_chosen, avg(1.0*tokens_out/(backend_latency_ms/1000.0)) "
+                "FROM requests WHERE backend_chosen LIKE 'local%' AND tokens_out>0 "
+                "AND backend_latency_ms>0 GROUP BY backend_chosen").fetchall():
+                if ts:
+                    measured[bk] = ts
         except Exception:
             pass
 
@@ -271,10 +291,15 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 ctx = _seat_maxlen(ep)                    # actual served window (max_model_len)
                 if ctx is None:                           # fallback: johnny native, then static
                     ctx = inv.get(model, {}).get("context") if model else b.context
+                n_gpus = len(inv.get(model, {}).get("gpus") or [])
+                tok_s = measured.get(name)                # measured throughput for this seat
+                seat_watts = n_gpus * en.gpu_watts + host_base * n_gpus / total_gpus
+                elec = round(seat_watts * en.price_kwh / (tok_s * 3.6), 3) if tok_s else None
                 e.update(kind="local", role=b.johnny_target, model=model, endpoint=ep,
                          state=(res.state if res else "absent"),
-                         eta_s=(res.eta_s if res else None),
-                         context=ctx, price_in=0.0, price_out=0.0, rank=1)
+                         eta_s=(res.eta_s if res else None), context=ctx,
+                         gpus=n_gpus, tok_s=(round(tok_s, 1) if tok_s else None),
+                         price_in=0.0, price_out=0.0, elec_per_mtok=elec, rank=1)
             else:
                 e.update(kind=("cloud" if b.provider == "anthropic" else "backend"),
                          model=b.model, state="ready", context=b.context,
