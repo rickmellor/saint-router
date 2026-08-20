@@ -187,6 +187,22 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
 
 
 
+def _seat_maxlen(endpoint: str | None) -> int | None:
+    """The seat's ACTUAL served context (vLLM max_model_len) from its /v1/models — the
+    launched window, not the model's native maximum. None on any failure."""
+    if not endpoint:
+        return None
+    import json as _json
+    import urllib.request as _url
+    probe = endpoint.replace("0.0.0.0", "127.0.0.1").rstrip("/")
+    try:
+        with _url.urlopen(f"{probe}/models", timeout=2) as r:
+            data = _json.loads(r.read())
+        return (data.get("data") or [{}])[0].get("max_model_len")
+    except Exception:
+        return None
+
+
 def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
     app = FastAPI(title="saint", version="0.1.0")
     app.state.cfg = cfg
@@ -251,12 +267,14 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             if b.johnny_bound:
                 res = resolver.resolve(b.johnny_target) if resolver else None
                 model = res.model if (res and res.model) else b.model
-                e.update(kind="local", role=b.johnny_target, model=model,
-                         endpoint=(res.endpoint if res else b.base_url),
+                ep = res.endpoint if res else b.base_url
+                ctx = _seat_maxlen(ep)                    # actual served window (max_model_len)
+                if ctx is None:                           # fallback: johnny native, then static
+                    ctx = inv.get(model, {}).get("context") if model else b.context
+                e.update(kind="local", role=b.johnny_target, model=model, endpoint=ep,
                          state=(res.state if res else "absent"),
                          eta_s=(res.eta_s if res else None),
-                         context=(inv.get(model, {}).get("context") if model else b.context),
-                         price_in=0.0, price_out=0.0, rank=1)
+                         context=ctx, price_in=0.0, price_out=0.0, rank=1)
             else:
                 e.update(kind=("cloud" if b.provider == "anthropic" else "backend"),
                          model=b.model, state="ready", context=b.context,
