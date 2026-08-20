@@ -111,6 +111,26 @@ SAINT_AUTO = "saint-auto"
 SAINT_EXPLAIN = "saint-explain"
 SAINT_PREFIX = "saint-"
 
+# A short follow-up normally inherits the conversation's labels (so "yes, do that"
+# doesn't get classified out of context). But a short message carrying a clear code
+# signal is a fresh request, not a continuation — inheriting a prior "general" label
+# misroutes it to the chat seat ("write hello world in C" after "hello", 2026-08). If
+# the signal fires we let it classify instead; it lands on "code" on its own merits,
+# so this never makes a genuine continuation worse.
+import re as _re
+
+_CODE_SIGNAL = _re.compile(
+    r"\b(code|coding|program|script|function|class|method|compile|debug|regex|"
+    r"bug|refactor|async|import|c\+\+|python|rust|golang|java(script)?|typescript|"
+    r"bash|shell|sql|html|css|json|yaml|api|stack ?trace|traceback|"
+    r"write .*\bin (c|c\+\+|python|rust|go|java|js|ts|bash|sql)\b)\b",
+    _re.IGNORECASE,
+)
+
+
+def _has_code_signal(text: str) -> bool:
+    return bool(_CODE_SIGNAL.search(text or ""))
+
 
 @dataclass(frozen=True)
 class RoutingDecision:
@@ -271,7 +291,8 @@ async def decide_route(
     if has_labels and (
         empty_input
         or cfg.cache.sticky_conversations
-        or len(clf_input) < cfg.cache.short_follow_up_max_chars
+        or (len(clf_input) < cfg.cache.short_follow_up_max_chars
+            and not _has_code_signal(clf_input))
     ):
         labels = conv_entry.labels
         outcome = _outcome_from_labels(labels, "inherited", clf_input)
