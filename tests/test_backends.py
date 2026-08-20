@@ -61,3 +61,56 @@ async def test_passes_through_tools(cloud_backend, monkeypatch):
     kwargs = mock.call_args.kwargs
     assert kwargs["tools"] == tools
     assert kwargs["tool_choice"] == "auto"
+
+
+# --- volatile sentinel (per-turn context kept out of the cache prefix) -----------
+from saint.backends import append_volatile, inject_cache_control, split_volatile
+
+SENT = "<<<saint:volatile>>>"
+
+
+def test_split_volatile_extracts_tail_and_strips_marker():
+    msgs = [
+        {"role": "system", "content": f"Today is 2026-08-19.\n{SENT}\nCurrent time: 8:20 PM."},
+        {"role": "user", "content": "hi"},
+    ]
+    out, vol = split_volatile(msgs, SENT)
+    assert vol == "Current time: 8:20 PM."
+    assert out[0]["content"] == "Today is 2026-08-19."          # head kept, marker gone
+    assert SENT not in out[0]["content"]
+    assert msgs[0]["content"].count(SENT) == 1                   # input untouched (copy-on-write)
+
+
+def test_split_volatile_absent_or_disabled():
+    msgs = [{"role": "system", "content": "stable"}, {"role": "user", "content": "hi"}]
+    assert split_volatile(msgs, SENT) == (msgs, None)
+    assert split_volatile([{"role": "system", "content": f"x{SENT}y"}], "") == (
+        [{"role": "system", "content": f"x{SENT}y"}], None)   # empty sentinel disables
+
+
+def test_split_volatile_whole_system_is_volatile_drops_message():
+    msgs = [{"role": "system", "content": f"{SENT}\nlive"}, {"role": "user", "content": "hi"}]
+    out, vol = split_volatile(msgs, SENT)
+    assert vol == "live"
+    assert all(m["role"] != "system" for m in out)              # empty head → system dropped
+
+
+def test_append_volatile_lands_after_cache_control_breakpoint():
+    # emulate the dispatch order: split → inject_cache_control → append
+    msgs = [
+        {"role": "system", "content": f"stable prefix\n{SENT}\nlive note"},
+        {"role": "user", "content": "x" * 5000},               # over min_chars → caching engages
+    ]
+    stable, vol = split_volatile(msgs, SENT)
+    cached, _ = inject_cache_control(stable, None, min_chars=4000)
+    final = append_volatile(cached, vol)
+    last = final[-1]["content"]                                 # last user message content (blocks)
+    assert isinstance(last, str) is False and last[-1] == {"type": "text", "text": "live note"}
+    # the volatile block is last and carries NO cache_control; the breakpoint sits before it
+    assert "cache_control" not in last[-1]
+    assert any("cache_control" in b for b in last[:-1])
+
+
+def test_append_volatile_creates_user_turn_when_none():
+    out = append_volatile([{"role": "system", "content": "s"}], "note")
+    assert out[-1] == {"role": "user", "content": [{"type": "text", "text": "note"}]}

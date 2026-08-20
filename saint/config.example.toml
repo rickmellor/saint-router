@@ -173,6 +173,16 @@ anthropic_prompt_caching = true
 prompt_cache_min_chars   = 4000   # skip tiny prompts (below Anthropic's cacheable minimum)
 # anthropic_cache_ttl    = "1h"   # longer cache window at 2x write cost (default 5m)
 
+# Volatile-context sentinel. A client puts per-turn context that must NOT be cached
+# (a live clock, git branch, active file, remaining budget) into its FIRST system
+# message, preceded by this marker. SAINT removes the marker, extracts everything after
+# it, and re-attaches it as a trailing block on the last user message — AFTER every cache
+# breakpoint — so it reaches the model but never invalidates the cached prefix (or the
+# local engine's prefix reuse) and never skews the classifier. Applies to all backends
+# (the marker is always stripped). Note the relocated text becomes user-role, so phrase
+# it as context, not as a system directive. Set to "" to disable (marker passes through).
+# volatile_sentinel = "<<<saint:volatile>>>"
+
 # ---- johnny integration (optional) -------------------------------------
 # Present iff any backend has a johnny binding (johnny_role/johnny_seat). johnny is a
 # local-inference manager that owns model lifecycle + liveness; SAINT asks it where a

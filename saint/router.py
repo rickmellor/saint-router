@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pathlib import Path
 
-from saint.backends import call_backend, inject_cache_control
+from saint.backends import append_volatile, call_backend, inject_cache_control, split_volatile
 from saint.classifier import (
     ClassifierError,
     ClassifierResult,
@@ -357,6 +357,9 @@ def _prepare_dispatch(
     Injection keys off the EFFECTIVE backend, so johnny-overridden seats (provider
     'openai') skip it naturally and a cloud while_loading target gets it."""
     out_messages = apply_stripping(messages, decision.stripped_last_user)
+    # Peel off any client-marked volatile context now (runs for every backend so the marker
+    # never reaches a model), reinject it at the tail after cache_control is placed.
+    out_messages, volatile = split_volatile(out_messages, cfg.cache.volatile_sentinel)
     backend = effective_backend or cfg.backends[decision.backend]
     out_tools = tools
     # Signed thinking blocks are HMAC-bound to the minting model — strip them when this
@@ -372,6 +375,8 @@ def _prepare_dispatch(
             min_chars=cfg.cache.prompt_cache_min_chars,
             ttl=cfg.cache.anthropic_cache_ttl,
         )
+    if volatile:  # after cache injection → lands past the last breakpoint
+        out_messages = append_volatile(out_messages, volatile)
     return backend, out_messages, out_tools
 
 

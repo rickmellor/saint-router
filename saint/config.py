@@ -131,6 +131,13 @@ class CacheConfig:
     anthropic_prompt_caching: bool = True
     prompt_cache_min_chars: int = 4000   # ~1k tokens; below Anthropic's cacheable minimum, skip
     anthropic_cache_ttl: str | None = None   # None = 5m default; "1h" allowed (2x write cost)
+    # A client marks per-turn volatile context (live clock, git branch, active file…) by
+    # placing this sentinel in the FIRST system message; everything after it is extracted,
+    # the marker removed, and the tail relocated to a trailing block on the last user
+    # message — i.e. AFTER every cache breakpoint, so it never invalidates the cached
+    # prefix (or the local engine's prefix reuse) and never reaches the classifier. Set to
+    # "" to disable (marker then passes through as literal text).
+    volatile_sentinel: str = "<<<saint:volatile>>>"
 
 
 @dataclass(frozen=True)
@@ -429,6 +436,7 @@ def load_config(path: Path) -> Config:
         anthropic_prompt_caching=bool(c_raw.get("anthropic_prompt_caching", True)),
         prompt_cache_min_chars=int(c_raw.get("prompt_cache_min_chars", 4000)),
         anthropic_cache_ttl=None if cache_ttl in (None, "5m") else cache_ttl,
+        volatile_sentinel=str(c_raw.get("volatile_sentinel", "<<<saint:volatile>>>")),
     )
 
     br_raw = raw.get("bedrock")

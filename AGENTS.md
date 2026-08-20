@@ -50,3 +50,10 @@ ModuleNotFoundError without it — expected locally, not a regression.
 - `!alias` prefix in the latest user message forces a backend (e.g. `!opus`).
 - `saint-auto` / `saint-explain` / `saint-<backend>` are the exposed model ids.
 - `on_error` is one-hop (no chains); `default_on_failure` is the last resort.
+- **Volatile sentinel** (`cache.volatile_sentinel`, default `<<<saint:volatile>>>`): a
+  client puts non-cacheable per-turn context (live clock, git branch, active file) after
+  this marker in its FIRST system message. `_prepare_dispatch` strips the marker and
+  relocates the tail to a trailing block on the last user message — after every cache
+  breakpoint — so it reaches the model without invalidating the cached prefix or skewing
+  the classifier. Helpers `split_volatile`/`append_volatile` in `saint/backends.py`. The
+  relocated text becomes user-role; phrase it as context, not a system directive.

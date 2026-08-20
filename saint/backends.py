@@ -78,6 +78,59 @@ def inject_cache_control(
     return out, out_tools
 
 
+def split_volatile(
+    messages: list[dict[str, Any]], sentinel: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Extract per-turn volatile context marked by `sentinel` in the first system message.
+
+    Everything after the sentinel is removed from the system message (the marker with it)
+    and returned as `volatile`. The caller relocates it to the tail via `append_volatile`
+    AFTER cache_control is placed, so it never sits inside the cached prefix. Copy-on-write;
+    inputs untouched. Returns (messages, None) when there's no sentinel to act on.
+    """
+    if not sentinel:
+        return messages, None
+    for i, m in enumerate(messages):
+        if m.get("role") != "system":
+            continue
+        content = m.get("content")
+        text = content if isinstance(content, str) else content_text(content)
+        if not text or sentinel not in text:
+            continue
+        head, _, tail = text.partition(sentinel)
+        head, tail = head.rstrip(), tail.strip()
+        out = [dict(x) for x in messages]
+        if head:
+            out[i] = {**out[i], "content": head}   # list/image system content collapses to
+        else:                                       # its text head — a non-issue for real callers
+            out.pop(i)
+        return out, (tail or None)
+    return messages, None
+
+
+def append_volatile(
+    messages: list[dict[str, Any]], volatile: str,
+) -> list[dict[str, Any]]:
+    """Append `volatile` as a trailing text block on the last user message (a new user
+    message if there is none). Placed after any cache_control block, so it rides *after*
+    the last cache breakpoint — present for the model, invisible to the cache prefix.
+    Copy-on-write."""
+    block = {"type": "text", "text": volatile}
+    out = [dict(m) for m in messages]
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            content = out[i].get("content")
+            if isinstance(content, list):
+                out[i]["content"] = [*content, block]
+            elif isinstance(content, str) and content:
+                out[i]["content"] = [{"type": "text", "text": content}, block]
+            else:
+                out[i]["content"] = [block]
+            return out
+    out.append({"role": "user", "content": [block]})
+    return out
+
+
 def _resolve_api_key(b: BackendConfig) -> str | None:
     if b.api_key:
         return b.api_key
