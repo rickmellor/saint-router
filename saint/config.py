@@ -45,6 +45,7 @@ class BackendConfig:
     price_out: float | None = None
     price_cache_read: float | None = None
     price_cache_write: float | None = None
+    context: int | None = None          # max context window (tokens); surfaced in /status
 
     @property
     def johnny_bound(self) -> bool:
@@ -334,6 +335,36 @@ def _load_toml(path: Path) -> dict:
         raise ValueError(f"Failed to parse TOML at {path}: {e}") from e
 
 
+# Built-in cloud ladder, auto-configured when ANTHROPIC_API_KEY is present. Each tier is
+# injected as a backend IFF the key is set AND no explicit [backends.<name>] already defines
+# it (explicit config always wins). This is how SAINT "auto-configures what models are
+# available" from keys alone — the runtime config need not list any cloud backend.
+_ANTHROPIC_LADDER = (
+    # name,            model,               aliases,             price_in, price_out, context
+    ("cloud-small",    "claude-haiku-4-5",  ("haiku",),           1.0,  5.0,   200_000),
+    ("cloud-medium",   "claude-sonnet-5",   ("sonnet",),          3.0,  15.0,  1_000_000),
+    ("cloud-large",    "claude-opus-5",     ("opus", "claude"),   5.0,  25.0,  1_000_000),
+    ("cloud-flagship", "claude-fable-5",    ("fable",),           10.0, 50.0,  1_000_000),
+)
+
+
+def _auto_cloud_backends(existing: dict[str, BackendConfig]) -> dict[str, BackendConfig]:
+    """The provider ladders to inject given the current env + explicit config."""
+    out: dict[str, BackendConfig] = {}
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        for name, model, aliases, pin, pout, ctx in _ANTHROPIC_LADDER:
+            if name in existing:
+                continue
+            out[name] = BackendConfig(
+                name=name, provider="anthropic", model=model,
+                api_key_env="ANTHROPIC_API_KEY", api_key=None, base_url=None,
+                aliases=aliases, timeout_s=120,
+                on_error=("local-chat" if "local-chat" in existing else None),
+                price_in=pin, price_out=pout, context=ctx,
+            )
+    return out
+
+
 def load_config(path: Path) -> Config:
     raw = _load_toml(path)
 
@@ -370,7 +401,12 @@ def load_config(path: Path) -> Config:
                               if b.get("price_cache_read") is not None else None),
             price_cache_write=(float(b["price_cache_write"])
                                if b.get("price_cache_write") is not None else None),
+            context=int(b["context"]) if b.get("context") is not None else None,
         )
+
+    # Auto-configure provider ladders from key presence (explicit [backends] already win).
+    for name, auto in _auto_cloud_backends(backends).items():
+        backends[name] = auto
 
     cls_raw = raw["classifier"]
     classifier = ClassifierConfig(

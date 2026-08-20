@@ -215,6 +215,56 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             ],
         }
 
+    @app.get("/status")
+    async def status() -> dict[str, Any]:
+        """The full 'available choices' map for clients (e.g. input): every routable backend
+        with its kind, live johnny state, model, context window, price, and a cost rank.
+        Local seats are resolved live via johnny; cloud tiers come from config/auto-config."""
+        import json as _json
+        import subprocess as _sp
+
+        # johnny inventory (best-effort): model -> {context, state} + the active profile
+        inv: dict[str, dict[str, Any]] = {}
+        profile = None
+        try:
+            p = _sp.run(["johnny", "status", "--json"], capture_output=True, text=True, timeout=5)
+            if p.returncode == 0:
+                jd = _json.loads(p.stdout)
+                profile = jd.get("profile")
+                for s in jd.get("seats", []):
+                    if s.get("model"):
+                        inv[s["model"]] = {"context": s.get("native_context"),
+                                           "state": s.get("state")}
+        except Exception:
+            pass
+
+        resolver = app.state.resolver
+        choices: list[dict[str, Any]] = [
+            {"id": "saint-auto", "kind": "router", "label": "auto", "aliases": [],
+             "state": "ready", "context": None, "price_in": None, "price_out": None, "rank": 0},
+        ]
+        for name, b in cfg.backends.items():
+            if name in ("local-embed", "local-classifier"):
+                continue                              # infra seats, not chat choices
+            e: dict[str, Any] = {"id": f"saint-{name}", "backend": name,
+                                 "aliases": list(b.aliases)}
+            if b.johnny_bound:
+                res = resolver.resolve(b.johnny_target) if resolver else None
+                model = res.model if (res and res.model) else b.model
+                e.update(kind="local", role=b.johnny_target, model=model,
+                         endpoint=(res.endpoint if res else b.base_url),
+                         state=(res.state if res else "absent"),
+                         eta_s=(res.eta_s if res else None),
+                         context=(inv.get(model, {}).get("context") if model else b.context),
+                         price_in=0.0, price_out=0.0, rank=1)
+            else:
+                e.update(kind=("cloud" if b.provider == "anthropic" else "backend"),
+                         model=b.model, state="ready", context=b.context,
+                         price_in=b.price_in, price_out=b.price_out,
+                         rank=100 + (b.price_in or 0.0))   # cost-ascending for hotkeys
+            choices.append(e)
+        return {"profile": profile, "choices": choices}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Any:
         body = await request.json()
