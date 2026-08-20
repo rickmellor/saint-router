@@ -263,14 +263,21 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         en = cfg.energy
         total_gpus = len(all_gpus) or 1
         host_base = max(0.0, en.host_watts - total_gpus * en.gpu_watts)
+        # Sustained throughput per local seat: p75 of the per-response decode rate over
+        # SUBSTANTIAL responses (tokens_out>=128 amortizes TTFT; p75 trims queue-slowed
+        # outliers) — reflects the decode rate you actually see, not a mean dragged down by
+        # short replies. Needs >=5 samples, else the seat shows FREE without a cost.
         measured: dict[str, float] = {}
         try:
-            for bk, ts in app.state.db.execute(
-                "SELECT backend_chosen, avg(1.0*tokens_out/(backend_latency_ms/1000.0)) "
-                "FROM requests WHERE backend_chosen LIKE 'local%' AND tokens_out>0 "
-                "AND backend_latency_ms>0 GROUP BY backend_chosen").fetchall():
-                if ts:
-                    measured[bk] = ts
+            by_bk: dict[str, list] = {}
+            for bk, tok, lat in app.state.db.execute(
+                "SELECT backend_chosen, tokens_out, backend_latency_ms FROM requests "
+                "WHERE backend_chosen LIKE 'local%' AND tokens_out>=128 AND backend_latency_ms>0"):
+                by_bk.setdefault(bk, []).append(tok / (lat / 1000.0))
+            for bk, rates in by_bk.items():
+                if len(rates) >= 5:
+                    rates.sort()
+                    measured[bk] = rates[min(len(rates) - 1, int(len(rates) * 0.75))]
         except Exception:
             pass
 
