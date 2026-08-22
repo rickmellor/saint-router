@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 import uuid
@@ -163,6 +165,32 @@ def _extract_forwarded(body: dict[str, Any]) -> dict[str, Any]:
     return {k: body[k] for k in _FORWARDED_PARAMS if k in body}
 
 
+_RETRAIN_CACHE: dict[str, object] = {"mtime": None, "reason": None}
+
+
+def _retrain_reason() -> str | None:
+    """The retrain-needed reason if the drift monitor set the flag, else None. mtime-cached so
+    it's a cheap stat per request (re-reads only when the flag file changes). Self-clearing:
+    when the flag is removed (drift healthy again), this returns None and the header stops."""
+    from saint.config import RETRAIN_FLAG_PATH
+    path = os.path.expanduser(RETRAIN_FLAG_PATH)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        _RETRAIN_CACHE["mtime"] = None
+        _RETRAIN_CACHE["reason"] = None
+        return None
+    if mt != _RETRAIN_CACHE["mtime"]:
+        try:
+            reason = (json.load(open(path)).get("reason")
+                      or "classifier drift — retrain suggested")
+        except Exception:
+            reason = "classifier drift — retrain suggested"
+        _RETRAIN_CACHE["mtime"] = mt
+        _RETRAIN_CACHE["reason"] = str(reason)[:200].replace("\n", " ")
+    return _RETRAIN_CACHE["reason"]  # type: ignore[return-value]
+
+
 def _route_headers(decision, served: str, eff) -> dict[str, str]:
     """Routing metadata surfaced on every response (OpenRouter-style, always on).
     Lets clients see why they got routed without reading the request log."""
@@ -171,6 +199,9 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
         "x-saint-backend": served,
         "x-saint-urgency": decision.urgency,
     }
+    retrain = _retrain_reason()
+    if retrain:
+        h["x-saint-retrain"] = retrain
     if decision.classifier_result:
         h["x-saint-domain"] = decision.classifier_result.domain
         h["x-saint-complexity"] = decision.classifier_result.complexity

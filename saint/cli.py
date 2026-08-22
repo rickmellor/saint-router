@@ -583,6 +583,35 @@ def classifier_train(
     typer.echo("  set classifier.mode = 'embedding' in your config to use it (falls back to the LLM when unsure).")
 
 
+_DRIFT_ROUTE_AGREEMENT_MIN = 0.9   # below this, on a non-tiny sample, is "out of bounds"
+
+
+def _sync_retrain_flag(data: dict) -> None:
+    """Write the retrain-needed flag when drift is out of bounds, else clear it (self-syncing).
+    The server reads this file to emit `x-saint-retrain`; the flag carries the fix command."""
+    import datetime
+    import json as _j
+    from saint.config import RETRAIN_FLAG_PATH
+
+    fp = Path(os.path.expanduser(RETRAIN_FLAG_PATH))
+    dr = data.get("drift")
+    bad = bool(dr) and not dr.get("small_sample") and \
+        dr.get("routing_agreement", 1.0) < _DRIFT_ROUTE_AGREEMENT_MIN
+    if bad:
+        reason = (f"classifier drift: routing agreement {dr['routing_agreement'] * 100:.0f}% "
+                  f"on {dr['sample']} recent deferrals — run: saint classifier train")
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(_j.dumps({
+            "reason": reason, "metrics": dr, "fix": "saint classifier train",
+            "detected_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        }, indent=2))
+    else:
+        try:
+            fp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 @classifier_app.command("status")
 def classifier_status(
     config: Path | None = typer.Option(None, help="Path to config.toml"),
@@ -592,6 +621,11 @@ def classifier_status(
     ),
     limit: int = typer.Option(200, "--limit", help="Max rows for the --drift comparison."),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output (for monitoring jobs)."),
+    write_flag: bool = typer.Option(
+        True, "--write-flag/--no-write-flag",
+        help="On --drift, write/clear the retrain-needed flag (drives the server's "
+             "x-saint-retrain header). Default on; --no-write-flag for read-only inspection.",
+    ),
 ):
     """Show classifier mode, head metadata, live coverage, and (--drift) boundary drift.
 
@@ -741,6 +775,8 @@ def classifier_status(
 
     data["suggestions"] = suggestions
     data["healthy"] = not suggestions
+    if drift and write_flag:
+        _sync_retrain_flag(data)
     if as_json:
         print(_json.dumps(data, indent=2))
         return

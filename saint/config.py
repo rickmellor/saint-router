@@ -375,6 +375,11 @@ def _auto_cloud_backends(existing: dict[str, BackendConfig]) -> dict[str, Backen
     return out
 
 
+# Flag file written by `saint classifier status --drift` when boundary drift is out of bounds,
+# and read by the server to surface an `x-saint-retrain` response header. Self-clearing.
+RETRAIN_FLAG_PATH = "~/.config/saint/retrain-needed.flag"
+
+
 def load_config(path: Path) -> Config:
     raw = _load_toml(path)
 
