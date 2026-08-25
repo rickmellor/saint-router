@@ -97,3 +97,76 @@ async def test_classify_returns_result_when_confident(monkeypatch):
     assert result.domain == "code"
     assert result.complexity == "trivial"
     assert "embedding head" in result.reason
+
+
+# --------------------------------------------------------------- context-window resilience
+class _CtxError(Exception):
+    """Stands in for what an OpenAI-compatible embedder returns when input overflows."""
+
+    def __init__(self, n: int):
+        super().__init__(
+            f"This model's maximum context length is 2048 tokens. However, you requested "
+            f"0 output tokens and your prompt contains at least {n} input tokens."
+        )
+
+
+def _fake_raw(char_limit: int, calls: list | None = None):
+    """A _embed_raw stand-in that refuses any batch containing an over-long text."""
+
+    async def raw(_backend, texts):
+        if calls is not None:
+            calls.append(list(texts))
+        if any(len(t) > char_limit for t in texts):
+            raise _CtxError(max(len(t) for t in texts))
+        return np.ones((len(texts), 4), dtype=np.float32)
+
+    return raw
+
+
+def test_is_context_error_matches_backend_wording():
+    assert EC._is_context_error(_CtxError(2049))
+    assert not EC._is_context_error(ConnectionError("connection refused"))
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_shrinks_an_oversize_text(monkeypatch):
+    monkeypatch.setattr(EC, "_embed_raw", _fake_raw(1000))
+    shrunk: list[tuple[int, int]] = []
+    X = await EC.embed_texts(_backend(), ["x" * 8000], on_shrink=lambda o, k: shrunk.append((o, k)))
+    assert X.shape == (1, 4)
+    assert shrunk and shrunk[0][0] == 8000
+    assert shrunk[0][1] <= 1000          # halved until the backend accepted it
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_one_bad_row_does_not_fail_the_batch(monkeypatch):
+    monkeypatch.setattr(EC, "_embed_raw", _fake_raw(1000))
+    texts = ["fits", "x" * 8000, "also fits"]
+    X = await EC.embed_texts(_backend(), texts)
+    assert X.shape == (3, 4)             # every row still gets a vector
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_passes_short_batches_straight_through(monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(EC, "_embed_raw", _fake_raw(1000, calls))
+    X = await EC.embed_texts(_backend(), ["a", "b"])
+    assert X.shape == (2, 4)
+    assert calls == [["a", "b"]]         # no per-text fallback when nothing overflows
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_reraises_non_context_errors(monkeypatch):
+    async def raw(_backend, _texts):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(EC, "_embed_raw", raw)
+    with pytest.raises(ConnectionError):
+        await EC.embed_texts(_backend(), ["anything"])
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_gives_up_below_the_floor(monkeypatch):
+    monkeypatch.setattr(EC, "_embed_raw", _fake_raw(10))   # nothing realistic ever fits
+    with pytest.raises(_CtxError):        # surfaces the backend's refusal rather than looping
+        await EC.embed_texts(_backend(), ["x" * 8000])

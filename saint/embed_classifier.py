@@ -29,9 +29,24 @@ DEFAULT_HEAD_PATH = "~/.config/saint/classifier_head.npz"
 
 
 # --------------------------------------------------------------------------- embedding
-async def embed_texts(backend: BackendConfig, texts: list[str]) -> np.ndarray:
-    """Embed a batch of texts via the backend's OpenAI-compatible /v1/embeddings. Returns
-    an (n, dim) float32 array. Raises on transport/model error (caller decides fallback)."""
+# An embedder has a hard context window (nomic-embed: 2048 tokens) and no way to ask it
+# to truncate. A character cap can't stand in for it: measured against nomic-embed, prose
+# runs ~4.5 chars/token but JSON ~1.3, so any cap safe for the dense case throws away most
+# of a prose prompt. Instead we send the text as-is and only shrink what actually overflows.
+_CTX_MARKERS = ("maximum context length", "context window", "context_length_exceeded",
+                "is longer than the maximum", "reduce the length")
+_SHRINK_FLOOR = 256      # chars; below this a row is not worth classifying
+_SHRINK_TRIES = 8        # halving from any realistic prompt reaches the floor well inside this
+
+
+def _is_context_error(exc: BaseException) -> bool:
+    """True when a backend refused the input for exceeding its context window."""
+    if type(exc).__name__ == "ContextWindowExceededError":
+        return True
+    return any(m in str(exc).lower() for m in _CTX_MARKERS)
+
+
+async def _embed_raw(backend: BackendConfig, texts: list[str]) -> np.ndarray:
     import litellm
 
     resp = await litellm.aembedding(
@@ -47,6 +62,40 @@ async def embed_texts(backend: BackendConfig, texts: list[str]) -> np.ndarray:
         for d in data
     ]
     return np.vstack(vecs)
+
+
+async def _embed_one_shrinking(backend: BackendConfig, text: str, on_shrink=None) -> np.ndarray:
+    """Embed one text, halving it until the backend accepts it. Raises if it never fits."""
+    t, original = text, len(text)
+    for _ in range(_SHRINK_TRIES):
+        try:
+            vec = await _embed_raw(backend, [t])
+            if len(t) < original and on_shrink is not None:
+                on_shrink(original, len(t))
+            return vec
+        except Exception as e:
+            if not _is_context_error(e) or len(t) <= _SHRINK_FLOOR:
+                raise
+            t = t[: max(_SHRINK_FLOOR, len(t) // 2)]
+    raise RuntimeError(f"could not fit a {original}-char text into {backend.name}'s context")
+
+
+async def embed_texts(backend: BackendConfig, texts: list[str], *, on_shrink=None) -> np.ndarray:
+    """Embed a batch of texts via the backend's OpenAI-compatible /v1/embeddings. Returns
+    an (n, dim) float32 array. Raises on transport/model error (caller decides fallback).
+
+    If the batch is refused for exceeding the embedder's context window, each text is
+    embedded individually and any oversize one is halved until it fits — one pathological
+    row can't fail the batch. `on_shrink(original_chars, kept_chars)` fires per shrink so
+    callers can report how much was dropped."""
+    if not texts:
+        return np.empty((0, 0), dtype=np.float32)
+    try:
+        return await _embed_raw(backend, list(texts))
+    except Exception as e:
+        if not _is_context_error(e):
+            raise
+    return np.vstack([await _embed_one_shrinking(backend, t, on_shrink) for t in texts])
 
 
 # --------------------------------------------------------------------------- math

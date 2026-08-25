@@ -558,11 +558,15 @@ def classifier_train(
 
     typer.echo(f"embedding {len(prompts)} prompts via '{eb_name}'…")
 
+    shrunk: list[tuple[int, int]] = []
+
     async def _embed_all() -> "np.ndarray":
         chunks = []
         batch = 64
         for i in range(0, len(prompts), batch):
-            chunks.append(await EC.embed_texts(embed_backend, prompts[i:i + batch]))
+            chunks.append(await EC.embed_texts(
+                embed_backend, prompts[i:i + batch],
+                on_shrink=lambda o, k: shrunk.append((o, k))))
             typer.echo(f"  {min(i + batch, len(prompts))}/{len(prompts)}")
         return np.vstack(chunks)
 
@@ -571,6 +575,10 @@ def classifier_train(
     except Exception as e:
         typer.secho(f"embedding failed: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from None
+
+    if shrunk:
+        typer.echo(f"  note: {len(shrunk)} prompt(s) exceeded '{eb_name}' context and were "
+                   f"truncated to fit (largest {max(o for o, _ in shrunk)} chars)")
 
     head = EC.train_head(X, doms, cplxs, embed_model=str(embed_backend.model))
     out = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
@@ -736,14 +744,21 @@ def classifier_status(
             say(f"\ndrift check: replaying head over {len(rows)} LLM-labeled rows "
                 f"since training…{small_n}")
 
+            shrunk: list[tuple[int, int]] = []
+
             async def _embed():
                 chunks = []
                 for i in range(0, len(prompts), 64):
-                    chunks.append(await EC.embed_texts(cfg.backends[eb_name], prompts[i:i + 64]))
+                    chunks.append(await EC.embed_texts(
+                        cfg.backends[eb_name], prompts[i:i + 64],
+                        on_shrink=lambda o, k: shrunk.append((o, k))))
                 import numpy as np
                 return np.vstack(chunks)
 
             X = asyncio.run(_embed())
+            if shrunk:
+                say(f"  note: {len(shrunk)} row(s) exceeded {eb_name}'s context window and were "
+                    f"truncated to fit (largest {max(o for o, _ in shrunk)} chars)")
             dom_hit = cplx_hit = route_hit = confident = 0
             for k, (_, dom, cplx) in enumerate(rows):
                 dl, dc, cl, cc = head.predict(X[k])
@@ -762,6 +777,7 @@ def classifier_status(
                 "of these (they deferred when served)")
             data["drift"] = {
                 "sample": n, "small_sample": n < 30,
+                "truncated_rows": len(shrunk),
                 "domain_agreement": round(dom_hit / n, 3),
                 "complexity_agreement": round(cplx_hit / n, 3),
                 "routing_agreement": round(route_hit / n, 3),
