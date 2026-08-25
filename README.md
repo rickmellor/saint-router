@@ -16,6 +16,12 @@ saint config init             # writes ~/.config/saint/config.toml from the bund
 saint serve
 ```
 
+Setting `ANTHROPIC_API_KEY` auto-injects the Anthropic ladder — `cloud-small` (Haiku),
+`cloud-medium` (Sonnet), `cloud-large` (Opus), `cloud-flagship` (Fable) — each reachable
+per-message by an alias (`!haiku`, `!sonnet`, `!opus`, `!fable`). An explicit
+`[backends.<name>]` block always overrides the auto entry. Without the key there are no cloud
+backends at all, so a policy that references one fails config validation.
+
 Configure your client (any OpenAI-compatible client — pi, hermes, opencode, Zed, …):
 
 - Base URL: `http://127.0.0.1:4000/v1`
@@ -47,6 +53,11 @@ WantedBy=default.target
 2. **Model name** is next: `model = "saint-cloud-large"` pins a backend; `saint-auto`
    runs the classifier; `saint-explain` returns the routing decision without calling the
    destination model.
+
+   > **Only the full `saint-<backend>` id pins.** A bare backend name (`cloud-large`,
+   > `local-coder`) is not an error and not a pin — it falls through to the classifier, so a
+   > client that thinks it pinned Opus can be quietly served by a local seat. There is no
+   > warning; check `x-saint-pinned` on the response, which is absent when nothing pinned.
 3. **Classifier** sees the latest user message and returns `(domain ∈ code|general,
    complexity ∈ trivial|medium|hard)`. Agent clients that append memory-recall blocks to
    the user message can list those markers in `classifier.ignore_after` — the classifier
@@ -72,6 +83,30 @@ saint classifier status             # head metadata + live coverage + rows banke
 saint classifier status --drift     # replay the head vs recent LLM labels (boundary drift)
 saint classifier status --json      # machine-readable, for monitoring jobs (`healthy` bool)
 ```
+
+### Drift notification
+
+`saint classifier status --drift` replays the current head against recent LLM-labeled rows that
+postdate its training, and by default writes or clears `~/.config/saint/retrain-needed.flag`
+(`--no-write-flag` to inspect without touching it). The server reads that flag and emits
+`x-saint-retrain` on every response, so a client learns the head has drifted from traffic it is
+already making — no polling, no monitoring stack. It self-clears when drift returns in bounds.
+
+Run it on a timer. Two things to know:
+
+- **The flag is not proof the check ran.** It is only rewritten when the command *finishes*, so
+  a crashed check leaves the previous state — a failure looks exactly like a clean bill of
+  health. Check the exit status of the job, not the flag.
+- **A small sample reads optimistically.** Right after a retrain there are few comparable rows;
+  agreement on a handful of them means little, and the flag deliberately ignores tiny samples.
+
+### Embedding limits
+
+The embedding backend has a hard context window (nomic-embed: 2048 tokens) and no way to ask it
+to truncate. A character cap can't stand in for it — prose runs ~4.5 chars/token and JSON ~1.3,
+a 3.5× spread — so any cap safe for dense input discards most of a prose prompt. Instead, text
+is sent as-is and only what actually overflows is shrunk, per text, so one pathological row
+can't fail a batch. Both training and drift report what they truncated.
 
 The trainer only uses rows labeled by the LLM classifier — never the head's own output
 (no self-distillation feedback loop) and never cache-reused labels. To bootstrap a fresh
@@ -131,6 +166,14 @@ backend's static `base_url`/`model`. Otherwise the backend serves its **static b
 - saint **provides** per-request latency / TTFT / tokens to johnny's telemetry ingest
   spool (best-effort, non-fatal). See the `[johnny]` block in `config.example.toml`.
 
+## Discovery — `GET /status`
+
+`/status` returns the full set of routable choices: every backend with its `kind`
+(router/local/cloud), live johnny state, model, endpoint and context window for locals, model
+/ context / price for cloud tiers, and a cost `rank`. A client can build its whole seat list
+from this rather than hardcoding one — dormant seats simply aren't there, and a seat that comes
+up mid-session appears without a config change.
+
 ## Embeddings
 
 `POST /v1/embeddings` routes to `routing.embeddings_backend` (johnny-resolved like any
@@ -160,8 +203,10 @@ setup. Install with the extra: `uv tool install 'saint-router[bedrock]'`.
 
 Every response carries routing metadata headers — `x-saint-backend`, `x-saint-domain`,
 `x-saint-complexity`, `x-saint-classifier`, `x-saint-urgency`, `x-saint-state`,
-`x-saint-request-id`, and `x-saint-decided` when a dispatch fallback changed the server.
-`curl -si` tells you the whole story without opening the log.
+`x-saint-request-id`, `x-saint-pinned` when a pin was honoured, `x-saint-decided` when a
+dispatch fallback changed the server, and `x-saint-retrain` while the classifier drift flag is
+set. `curl -si` tells you the whole story without opening the log. Header values are folded to
+ASCII, so prose written into the drift flag can't produce an unencodable header.
 
 Every request lands in a SQLite log (`saint log show` / `saint log id <N>`), and the
 accounting rolls up with **net savings against a counterfactual**:
@@ -173,6 +218,12 @@ actual est cost   $1.43
 all-cloud-large counterfactual (uncached): $9.80
 NET SAVINGS $8.38  =  local routing $6.24 + cheaper tiers $0.02 + prompt caching $2.11
 ```
+
+Local seats are priced too. The `[energy]` block (`price_kwh`, `host_watts`, `gpu_watts` —
+all tunable, nothing hardcoded) turns a seat's measured decode rate into $/Mtok of electricity,
+so a local seat and a cloud tier can be compared in one unit. The rate is measured from SAINT's
+own request log — the p75 of per-response decode rate over substantial responses, which avoids
+short replies where fixed TTFT drags the average down.
 
 Give priced backends `price_in` / `price_out` (USD per Mtok; anthropic cache prices
 derive as 0.1× / 1.25× of `price_in`). The counterfactual sends all chat traffic to
@@ -212,6 +263,8 @@ saint config init [--path P] [--force]    # write a starter config from the bund
 saint config show                         # dump validated config (api keys masked)
 saint classifier train [--limit N]        # distill the embedding head from logged labels
 saint classifier status [--drift] [--json]# head metadata, coverage, drift, retrain nudges
+                          [--limit N]       #   rows compared for --drift (default 200)
+                          [--no-write-flag] #   inspect without touching the retrain flag
 saint log show [--limit N] [--backend X]  # tail recent requests
 saint log id <ID>                         # full detail of one request
 saint log stats [--days N] [--baseline B] [--json]   # usage, cost, net savings
