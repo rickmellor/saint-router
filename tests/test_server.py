@@ -348,6 +348,41 @@ def test_route_headers_on_classified_request(tmp_path):
     assert "x-saint-decided" not in resp.headers  # no fallback hop taken
 
 
+def test_header_safe_folds_non_ascii():
+    from saint.server import _header_safe
+    assert _header_safe("drift \u2014 retrain") == "drift - retrain"
+    assert _header_safe("embedding head \u00b7 conf 0.92") == "embedding head - conf 0.92"
+    assert _header_safe("line\nbreak") == "line break"
+
+
+def test_retrain_header_with_non_ascii_reason_does_not_break_the_response(tmp_path,
+                                                                          monkeypatch):
+    """A drift flag written with an em dash must not 500 every response (starlette encodes
+    header values as latin-1). Regression: the flag's reason reached the header verbatim."""
+    import saint.config as _sc
+    import saint.server as _ss
+
+    flag = tmp_path / "retrain-needed.flag"
+    flag.write_text(json.dumps({
+        "reason": "classifier drift: routing agreement 63% on 30 recent deferrals "
+                  "\u2014 run: saint classifier train"}))
+    monkeypatch.setattr(_sc, "RETRAIN_FLAG_PATH", str(flag), raising=False)
+    monkeypatch.setitem(_ss._RETRAIN_CACHE, "mtime", None)
+    monkeypatch.setitem(_ss._RETRAIN_CACHE, "reason", None)
+
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    with patch("saint.backends.litellm.acompletion", AsyncMock(return_value=_OK)):
+        resp = client.post("/v1/chat/completions", json={
+            "model": "saint-local-chat",
+            "messages": [{"role": "user", "content": "Say OK."}]})
+    assert resp.status_code == 200
+    hdr = resp.headers["x-saint-retrain"]
+    hdr.encode("latin-1")                      # the thing that used to raise
+    assert "63%" in hdr and "\u2014" not in hdr
+
+
 def test_embeddings_endpoint_routes_and_logs(tmp_path):
     from dataclasses import replace
     cfg = _cfg()

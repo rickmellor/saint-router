@@ -165,6 +165,21 @@ def _extract_forwarded(body: dict[str, Any]) -> dict[str, Any]:
     return {k: body[k] for k in _FORWARDED_PARAMS if k in body}
 
 
+# Starlette encodes header values as latin-1 and raises on anything outside it. Reasons and
+# classifier notes are prose written by humans and other tools, so they carry em dashes,
+# smart quotes and middots. Fold them rather than let one character 500 every response.
+_HEADER_FOLD = str.maketrans({
+    "\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+    "\u201c": '"', "\u201d": '"', "\u2026": "...", "\u00b7": "-",
+})
+
+
+def _header_safe(value: str) -> str:
+    """An ASCII-only, single-line rendering of `value`, safe as an HTTP header value."""
+    folded = str(value).translate(_HEADER_FOLD).replace("\n", " ").replace("\r", " ")
+    return folded.encode("ascii", "ignore").decode("ascii").strip()
+
+
 _RETRAIN_CACHE: dict[str, object] = {"mtime": None, "reason": None}
 
 
@@ -213,7 +228,7 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
         h["x-saint-decided"] = decision.backend  # dispatch fallback changed the server
     if eff is not None and eff.state_at_dispatch:
         h["x-saint-state"] = eff.state_at_dispatch
-    return h
+    return {k: _header_safe(v) for k, v in h.items()}
 
 
 
