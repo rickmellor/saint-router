@@ -592,6 +592,7 @@ def classifier_train(
 
 
 _DRIFT_ROUTE_AGREEMENT_MIN = 0.9   # below this, on a non-tiny sample, is "out of bounds"
+_DRIFT_MIN_SAMPLE = 30             # fewer rows than this is "small_sample" — measure, don't warn
 
 
 def _sync_retrain_flag(data: dict) -> None:
@@ -740,7 +741,7 @@ def classifier_status(
             data["drift"] = None
         else:
             prompts = [r[0] for r in rows]
-            small_n = "  (small sample)" if len(rows) < 30 else ""
+            small_n = "  (small sample)" if len(rows) < _DRIFT_MIN_SAMPLE else ""
             say(f"\ndrift check: replaying head over {len(rows)} LLM-labeled rows "
                 f"since training…{small_n}")
 
@@ -776,14 +777,16 @@ def classifier_status(
             say(f"  head now confident on {confident}/{n} ({100 * confident / n:.0f}%) "
                 "of these (they deferred when served)")
             data["drift"] = {
-                "sample": n, "small_sample": n < 30,
+                "sample": n, "small_sample": n < _DRIFT_MIN_SAMPLE,
                 "truncated_rows": len(shrunk),
                 "domain_agreement": round(dom_hit / n, 3),
                 "complexity_agreement": round(cplx_hit / n, 3),
                 "routing_agreement": round(route_hit / n, 3),
                 "now_confident": round(confident / n, 3),
             }
-            if route_hit / n < 0.9:
+            # Same bar the flag uses (_sync_retrain_flag): a handful of rows right after a
+            # retrain is noise, and warning on it reads as "the retrain didn't take".
+            if route_hit / n < _DRIFT_ROUTE_AGREEMENT_MIN and n >= _DRIFT_MIN_SAMPLE:
                 suggestions.append(
                     f"boundary drift: head disagrees with the LLM's routing on "
                     f"{n - route_hit}/{n} recent deferrals — retrain"
