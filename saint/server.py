@@ -494,6 +494,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             return _explain_response(_savings.render(rep, color=True), model_field)
 
         try:
+            from saint.anthropic_api import hoist_routing_directive
+            messages = hoist_routing_directive(messages)   # `::coder …` works where `!` is taken
+            body["messages"] = messages
             decision = await decide_route(
                 cfg=cfg, model_field=model_field, messages=messages,
                 caches=app.state.route_caches, session_id=session_id,
@@ -703,6 +706,16 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         client_model = body.get("model") or ""
         if body.get("max_tokens") is None:
             return anthropic_error(400, "invalid_request_error", "max_tokens is required")
+        from saint.anthropic_api import hoist_routing_directive
+        if os.environ.get("SAINT_DEBUG_LAST_USER"):   # shape of the client's last user turn (directive debugging)
+            for _m in reversed(body.get("messages", [])):
+                if _m.get("role") == "user":
+                    _c = _m.get("content")
+                    _shape = repr(_c[:300]) if isinstance(_c, str) else [
+                        (b.get("type"), (b.get("text") or "")[:120]) for b in _c if isinstance(b, dict)]
+                    print(f"[router] last-user shape: {_shape}", file=sys.stderr, flush=True)
+                    break
+        body["messages"] = hoist_routing_directive(body.get("messages", []))   # `::opus` → `@opus` up front
         stream = bool(body.get("stream", False))
 
         session_id = (request.headers.get("x-session-id")
@@ -739,8 +752,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         def _params_for(eff_c):
             # Signed thinking is HMAC-bound to the minting model; strip on a backend switch.
-            from saint.thinking import (sanitize_thinking_blocks, shape_thinking_param,
-                                        should_strip, strip_signed_thinking)
+            from saint.thinking import (fold_system_role_messages, sanitize_thinking_blocks,
+                                        shape_thinking_param, should_strip, strip_signed_thinking)
             provider = eff_c.backend.provider or ""
             p = shape_thinking_param(params, provider, eff_c.backend.model or "")
             msgs = p["messages"]
@@ -748,7 +761,16 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 msgs = strip_signed_thinking(msgs)
             if provider in ("anthropic", "bedrock"):
                 msgs = sanitize_thinking_blocks(msgs)   # empty/unsigned blocks 400 at Anthropic
-            return p if msgs is p["messages"] else {**p, "messages": msgs}
+                msgs = fold_system_role_messages(msgs, provider, eff_c.backend.model or "")
+            out_p = p if msgs is p["messages"] else {**p, "messages": msgs}
+            if os.environ.get("SAINT_DEBUG_DISPATCH"):   # exact outbound Messages params, for shape bugs
+                try:
+                    import json as _j
+                    with open(f"/tmp/saint-dispatch-{rid}.json", "w") as fh:
+                        _j.dump({"backend": eff_c.backend.name, "params": out_p}, fh, default=str)
+                except Exception:
+                    pass
+            return out_p
 
         def _refresh_affinity(served: str):
             # Record the backend that actually minted this turn's thinking, so later

@@ -21,6 +21,8 @@ Two adaptation problems live here:
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from saint.config import Config, resolve_backend
@@ -215,3 +217,51 @@ def last_user_text(body: dict) -> str:
         if m.get("role") == "user":
             return content_text(m.get("content"))
     return ""
+
+
+_DIRECTIVE_RUN = re.compile(r"^\s*((?:::[A-Za-z0-9_.-]+\s*)+)")
+
+
+def _sigil_to_at(run: str) -> str:
+    return " ".join("@" + t[2:] for t in run.split()) + " "
+
+
+def hoist_routing_directive(messages: list[dict]) -> list[dict]:
+    """Make `::token` routing directives work for clients that (a) reserve `!` and `@` for
+    themselves and (b) don't put the user's text first. Claude Code does both: `!` runs a
+    shell command, `@` references a file, and every user turn arrives as text blocks with
+    `<system-reminder>…` blocks BEFORE the typed text. A leading run of `::opus ::urgent`
+    tokens found at the start of ANY text block of the last user message is removed there
+    and re-inserted as `@opus @urgent ` at the very start of the first text block, where the
+    existing prefix parser (`@` semantics: unknown tokens are plain text) and
+    strip_prefix_from_messages already look. Copy-on-write."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            mt = _DIRECTIVE_RUN.match(content)
+            if not mt:
+                return messages
+            new = _sigil_to_at(mt.group(1)) + content[mt.end():]
+            return messages[:i] + [{**m, "content": new}] + messages[i + 1:]
+        if not isinstance(content, list):
+            return messages
+        blocks = list(content)
+        first_text = next((j for j, b in enumerate(blocks)
+                           if isinstance(b, dict) and b.get("type") == "text"), None)
+        if first_text is None:
+            return messages
+        for j, b in enumerate(blocks):
+            if not (isinstance(b, dict) and b.get("type") == "text"):
+                continue
+            mt = _DIRECTIVE_RUN.match(b.get("text") or "")
+            if not mt:
+                continue
+            blocks[j] = {**b, "text": (b["text"][mt.end():])}
+            head = blocks[first_text]
+            blocks[first_text] = {**head, "text": _sigil_to_at(mt.group(1)) + (head.get("text") or "")}
+            return messages[:i] + [{**m, "content": blocks}] + messages[i + 1:]
+        return messages
+    return messages

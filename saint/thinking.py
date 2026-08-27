@@ -109,3 +109,27 @@ def sanitize_thinking_blocks(messages: list[dict[str, Any]]) -> list[dict[str, A
                 changed = True
         out.append(m)
     return out if changed else messages
+
+
+def fold_system_role_messages(messages: list[dict[str, Any]], provider: str, model: str) -> list[dict[str, Any]]:
+    """Claude Code sends hook context as `{"role": "system"}` entries inside `messages`
+    (SessionStart "additional context"). Claude 5 models accept that; Haiku 4.5 answers
+    "role 'system' is not supported on this model" (2026-08-27). For Anthropic/Bedrock
+    targets outside the Claude 5 family, convert each such entry into a user message whose
+    text is wrapped in <system-reminder> — the representation those models were trained on.
+    Copy-on-write; other providers are left alone (chat-completions bridges accept system roles)."""
+    if provider not in _SIGNATURE_VALIDATING or any(t in (model or "") for t in _ADAPTIVE_OK):
+        return messages
+    changed = False
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") != "system":
+            out.append(m)
+            continue
+        changed = True
+        content = m.get("content")
+        text = content if isinstance(content, str) else "\n".join(
+            (b.get("text") or "") for b in (content or []) if isinstance(b, dict) and b.get("type") == "text")
+        out.append({"role": "user", "content": [{"type": "text",
+                    "text": f"<system-reminder>\n{text}\n</system-reminder>"}]})
+    return out if changed else messages
