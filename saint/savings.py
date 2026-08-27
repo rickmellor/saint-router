@@ -200,7 +200,7 @@ def render(rep: dict, color: bool = True) -> str:
 
     out.append("")
     out.append(f"  {c('gold')}{c('bold')}╔{'═' * (W - 2)}╗{R}")
-    title = "S A I N T   ·   S A V I N G S"
+    title = "S.A.I.N.T.   ·   S A V I N G S"   # Semantic Artificial Intelligence Network Terminus
     pad = (W - 2 - len(title)) // 2
     out.append(f"  {c('gold')}{c('bold')}║{R}{' ' * pad}{c('cyan')}{c('bold')}{title}{R}"
                f"{' ' * (W - 2 - pad - len(title))}{c('gold')}{c('bold')}║{R}")
