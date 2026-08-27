@@ -59,3 +59,53 @@ def strip_signed_thinking(messages: list[dict[str, Any]]) -> list[dict[str, Any]
                 changed = True
         out.append(new_m)
     return out if changed else messages
+
+
+# Models that accept `thinking: {"type": "adaptive"}` (Claude 5 family). Anything else gets the
+# param removed — Claude Code sends adaptive for every request, and Haiku 4.5 400s on it.
+_ADAPTIVE_OK = ("claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-mythos-5")
+
+
+def shape_thinking_param(params: dict, provider: str, model: str) -> dict:
+    """Make the request-level `thinking` param acceptable to the target:
+    - non-Anthropic backends: drop it (a local seat's thinking is its own template knob; with
+      it present, litellm's bridge re-routes through the OpenAI Responses API, which vLLM only
+      half-implements — Claude Code's tool history 400'd there, 2026-08-27);
+    - Anthropic/Bedrock models outside the Claude 5 family: drop `adaptive` (400 otherwise)."""
+    th = params.get("thinking")
+    if not isinstance(th, dict):
+        return params
+    if provider not in _SIGNATURE_VALIDATING:
+        return {k: v for k, v in params.items() if k != "thinking"}
+    if th.get("type") == "adaptive" and not any(t in (model or "") for t in _ADAPTIVE_OK):
+        return {k: v for k, v in params.items() if k != "thinking"}
+    return params
+
+
+def sanitize_thinking_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop thinking blocks that can never validate at Anthropic: empty text or no
+    signature. A local seat's turn (via litellm's bridge) leaves `{"type":"thinking",
+    "thinking":""}` in the client's history; Anthropic rejects the whole request
+    ("each thinking block must contain thinking"). Copy-on-write like strip_signed_thinking."""
+    changed = False
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        content = m.get("content")
+        if m.get("role") == "assistant" and isinstance(content, list):
+            keep = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "thinking" \
+                        and (not (b.get("thinking") or "").strip() or not b.get("signature")):
+                    changed = True
+                    continue
+                if isinstance(b, dict) and b.get("type") == "redacted_thinking" and not b.get("data"):
+                    changed = True
+                    continue
+                keep.append(b)
+            if len(keep) != len(content):
+                m = {**m, "content": keep}
+            if not keep:                       # an assistant turn can't be empty — leave a stub
+                m = {**m, "content": [{"type": "text", "text": "…"}]}
+                changed = True
+        out.append(m)
+    return out if changed else messages

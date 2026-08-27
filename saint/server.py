@@ -692,11 +692,16 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         def _params_for(eff_c):
             # Signed thinking is HMAC-bound to the minting model; strip on a backend switch.
-            from saint.thinking import should_strip, strip_signed_thinking
-            if should_strip(eff_c.backend.provider or "", decision.prev_backend,
-                            decision.backend):
-                return {**params, "messages": strip_signed_thinking(params["messages"])}
-            return params
+            from saint.thinking import (sanitize_thinking_blocks, shape_thinking_param,
+                                        should_strip, strip_signed_thinking)
+            provider = eff_c.backend.provider or ""
+            p = shape_thinking_param(params, provider, eff_c.backend.model or "")
+            msgs = p["messages"]
+            if should_strip(provider, decision.prev_backend, decision.backend):
+                msgs = strip_signed_thinking(msgs)
+            if provider in ("anthropic", "bedrock"):
+                msgs = sanitize_thinking_blocks(msgs)   # empty/unsigned blocks 400 at Anthropic
+            return p if msgs is p["messages"] else {**p, "messages": msgs}
 
         def _refresh_affinity(served: str):
             # Record the backend that actually minted this turn's thinking, so later

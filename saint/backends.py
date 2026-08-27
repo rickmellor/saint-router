@@ -231,8 +231,14 @@ async def call_backend_messages(backend: BackendConfig, *, params: dict[str, Any
     through litellm's messages→completion translation. Returns an
     AnthropicMessagesResponse, or an async iterator of Anthropic-format SSE bytes when
     stream=True."""
+    model_id = _resolve_model_id(backend)
+    if backend.provider == "openai" and backend.base_url:
+        # litellm's Messages bridge sends `openai/…` models to the OpenAI *Responses* API
+        # (vLLM's implementation rejects Claude Code's tool/system history with pydantic
+        # union errors); `hosted_vllm/…` keeps it on plain chat completions (2026-08-27).
+        model_id = f"hosted_vllm/{backend.model}"
     kwargs: dict[str, Any] = {
-        "model": _resolve_model_id(backend),
+        "model": model_id,
         "timeout": backend.timeout_s,
         **_provider_kwargs(backend),
         **params,

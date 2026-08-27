@@ -112,8 +112,15 @@ async def run_candidates(
                         asyncio.create_task(
                             spawn_sso_login(sso_cfg.credential_process, profile))
                     break  # same-backend retry is pointless until creds refresh
-                breaker.record_failure(cand)
                 detail = " ".join(str(e).split())[:300]   # the class name alone hid a day of 400s
+                status = getattr(e, "status_code", None)
+                if status in (400, 422) or "BadRequest" in error_kind or "invalid_request_error" in detail:
+                    # the REQUEST was malformed for this backend (shape/param), not the backend
+                    # unhealthy — counting it opened the breaker and blackholed a live seat for
+                    # 60 s on every client hiccup (2026-08-27). Still move on to the next candidate.
+                    pass
+                else:
+                    breaker.record_failure(cand)
                 print(f"[router] req#{rid}: dispatch to '{cand}' failed "
                       f"({error_kind}: {detail}) — {'retrying' if i == 0 and attempts == 2 else 'moving on'}",
                       file=sys.stderr, flush=True)
