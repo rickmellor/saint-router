@@ -56,6 +56,35 @@ def _explain_response(decision_text: str, model_field: str) -> dict[str, Any]:
     }
 
 
+import re as _re
+
+# /savings, /savings week, saint savings month, !savings, @savings … (case-insensitive)
+_SAVINGS_RE = _re.compile(
+    r"^\s*[/!@]?\s*(?:saint[\s-]+)?savings(?:[\s-]+report)?"
+    r"(?:\s+(hour|day|week|month|year|all))?\s*$", _re.IGNORECASE)
+
+
+def _savings_trigger(model_field: str, messages: list) -> str | None:
+    """Return the requested period if this request is a savings-report ask, else None.
+
+    Triggers on the reserved model (saint-savings[:period]) or a last-user-message
+    sentinel. Period defaults to 'day'; an unknown period falls back to 'day'."""
+    period = None
+    if model_field == "saint-savings" or model_field.startswith("saint-savings:"):
+        period = model_field.split(":", 1)[1] if ":" in model_field else "day"
+    else:
+        text = next((m.get("content", "") for m in reversed(messages)
+                     if m.get("role") == "user"), "")
+        if isinstance(text, str):
+            m = _SAVINGS_RE.match(text)
+            if m:
+                period = (m.group(1) or "day")
+    if period is None:
+        return None
+    period = period.strip().lower()
+    return period if period in _savings.PERIODS else "day"
+
+
 def _safe_log(db, row: LogRow) -> None:
     """Persist a log row. Failures here MUST NOT affect the response — log to stderr only."""
     try:
@@ -376,16 +405,13 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         # it is never forwarded upstream (absent from _FORWARDED_PARAMS).
         session_id = request.headers.get("x-session-id") or body.get("session_id")
 
-        # Reserved model: saint-savings[:period] returns the cost-savings report as the
-        # completion — no routing, no LLM, no cost (like saint-explain). Period comes from
-        # the model suffix or the last user message; defaults to 'day'.
-        if model_field == "saint-savings" or model_field.startswith("saint-savings:"):
-            period = (model_field.split(":", 1)[1] if ":" in model_field
-                      else next((m.get("content", "") for m in reversed(messages)
-                                 if m.get("role") == "user"), "")).strip().lower() or "day"
-            if period not in _savings.PERIODS:
-                period = "day"
-            rep = _savings.compute(app.state.db, cfg, period=period)
+        # Reserved savings report — returned as the completion, no routing/LLM/cost (like
+        # saint-explain). Two triggers, both a "prompt-time hint" the caller controls:
+        #   - model field:  "saint-savings" or "saint-savings:<period>"
+        #   - message text:  a line like "/savings", "/savings week", "saint savings month"
+        _sv = _savings_trigger(model_field, messages)
+        if _sv is not None:
+            rep = _savings.compute(app.state.db, cfg, period=_sv)
             return _explain_response(_savings.render(rep, color=True), model_field)
 
         try:
