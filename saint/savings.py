@@ -240,7 +240,10 @@ def render(rep: dict, color: bool = True) -> str:
         rate = (f"{x.elec_per_mtok:.2f}" if x.kind == "local" and x.elec_per_mtok
                 else "—" if x.kind == "local" else "")
         tag = " ⚡" if x.kind == "local" else ""
-        out.append(f"  {kc}{(x.backend + tag):<22}{R}{x.requests:>6}{x.tokens_out:>11,}"
+        name = x.backend + tag
+        # ⚡ renders as 2 terminal columns but counts as 1 char, so pad by visual width
+        pad = " " * max(0, 22 - len(name) - (1 if x.kind == "local" else 0))
+        out.append(f"  {kc}{name}{pad}{R}{x.requests:>6}{x.tokens_out:>11,}"
                    f"{c('dim')}{rate:>9}{R}{kc}{_money(x.actual_cost):>10}{R}")
     out.append("")
     # Flush-left, so a client that .strip()s the response can't misalign line 1
