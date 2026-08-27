@@ -16,8 +16,29 @@ def _default_config_path() -> Path:
     return Path(os.path.expanduser("~/.config/saint/config.toml"))
 
 
+def _load_env_file(path: Path) -> None:
+    """Source a KEY=VALUE env file (the systemd unit's EnvironmentFile) so CLI commands
+    see the same environment as `saint serve` — notably ANTHROPIC_API_KEY, which gates the
+    auto cloud ladder. Existing os.environ values win (setdefault); parse is forgiving."""
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip().strip('"').strip("'")
+            os.environ.setdefault(k.strip(), v)
+    except OSError:
+        pass
+
+
 def _load_or_die(config_path: Path | None):
     path = config_path or _default_config_path()
+    _load_env_file(path.parent / "env")     # mirror the service's EnvironmentFile
     if not path.exists():
         typer.secho(f"Config not found: {path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
