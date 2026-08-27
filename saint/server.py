@@ -345,7 +345,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             ],
         }
 
-    def _remember_decision(decision, *, served, session_id, model_field, latency_ms, usage, api):
+    def _remember_decision(decision, *, served, session_id, model_field, latency_ms, usage, api,
+                           eff=None, cache_read=None):
         """Keep the routing outcome of a request for clients that can't read response headers
         (Claude Code's status line polls GET /decisions/last?session=…)."""
         try:
@@ -359,7 +360,10 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 "pinned": decision.pinned_backend, "urgency": decision.urgency,
                 "domain": getattr(res, "domain", None), "complexity": getattr(res, "complexity", None),
                 "classifier": out.classifier_used if out else None,
-                "served_model": None, "latency_ms": latency_ms,
+                "served_model": (eff.backend.model if eff is not None and getattr(eff, "backend", None)
+                                 else (cfg.backends.get(served).model if served and cfg.backends.get(served) else None)),
+                "cache_read": cache_read if cache_read is not None else (usage or {}).get("cache_read_input_tokens"),
+                "latency_ms": latency_ms,
                 "tokens_in": (usage or {}).get("input_tokens") or (usage or {}).get("prompt_tokens"),
                 "tokens_out": (usage or {}).get("output_tokens") or (usage or {}).get("completion_tokens"),
             })
@@ -654,7 +658,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         cache_read, cache_write = _cache_tokens(usage)
         _remember_decision(decision, served=(result.backend if result else None),
                            session_id=session_id, model_field=model_field,
-                           latency_ms=backend_latency_ms, usage=usage, api="chat")
+                           latency_ms=backend_latency_ms, usage=usage, api="chat",
+                           eff=eff, cache_read=cache_read)
         _safe_log(app.state.db, build_log_row(
             decision=decision, model_field=model_field,
             backend_latency_ms=backend_latency_ms,
@@ -769,7 +774,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                               backend_override):
             _remember_decision(decision, served=served, session_id=session_id,
                                model_field=client_model, latency_ms=latency_ms, usage=usage,
-                               api="messages")
+                               api="messages", eff=eff)
             _safe_log(app.state.db, build_log_row(
                 decision=decision, model_field=client_model or "anthropic-messages",
                 backend_latency_ms=latency_ms,
