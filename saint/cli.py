@@ -210,6 +210,37 @@ log_app = typer.Typer(help="Inspect request log.")
 app.add_typer(log_app, name="log")
 
 
+@app.command("savings")
+def savings(
+    period: str = typer.Option("day", "--period", "-p",
+        help="hour | day | week | month | year | all"),
+    baseline: str | None = typer.Option(None, "--baseline",
+        help="Cloud backend for the counterfactual (default: routing.default_on_failure)."),
+    config: Path | None = typer.Option(None),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colour."),
+):
+    """Cost-savings report: cloud spend vs local energy cost vs what the router saved."""
+    from saint import savings as _sav
+    from saint.storage import open_db
+
+    cfg = _load_or_die(config)
+    if period not in _sav.PERIODS:
+        _emit_err(f"unknown period {period!r}; choose from {', '.join(_sav.PERIODS)}")
+        raise typer.Exit(2)
+    conn = open_db(Path(cfg.logging.db_path))
+    rep = _sav.compute(conn, cfg, period=period, baseline=baseline)
+    if as_json:
+        import json as _json
+        from dataclasses import asdict
+        rep = {**rep, "rows": [asdict(r) for r in rep["rows"]]}
+        print(_json.dumps(rep, indent=2))
+    else:
+        import sys as _sys
+        print(_sav.render(rep, color=(not no_color) and _sys.stdout.isatty()))
+
+
+
 @log_app.command("show")
 def log_show(
     limit: int = typer.Option(20, "--limit", "-n"),
