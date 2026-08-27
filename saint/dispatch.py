@@ -113,7 +113,8 @@ async def run_candidates(
                             spawn_sso_login(sso_cfg.credential_process, profile))
                     break  # same-backend retry is pointless until creds refresh
                 breaker.record_failure(cand)
+                detail = " ".join(str(e).split())[:300]   # the class name alone hid a day of 400s
                 print(f"[router] req#{rid}: dispatch to '{cand}' failed "
-                      f"({error_kind}) — {'retrying' if i == 0 and attempts == 2 else 'moving on'}",
+                      f"({error_kind}: {detail}) — {'retrying' if i == 0 and attempts == 2 else 'moving on'}",
                       file=sys.stderr, flush=True)
     return None, error_kind, eff

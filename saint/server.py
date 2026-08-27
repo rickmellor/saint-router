@@ -284,6 +284,37 @@ def _seat_maxlen(endpoint: str | None) -> int | None:
         return None
 
 
+
+class _MessageStartDedupe:
+    """SSE relay filter: drop every `message_start` event after the first. litellm's
+    Anthropic-Messages→chat-completions translation (OpenAI-compatible backends) emits the
+    message_start event twice; Anthropic clients treat a second one as a new message.
+    Splits on the blank line between SSE events; partial trailing bytes are held until
+    the event completes (flush() at end-of-stream)."""
+
+    def __init__(self):
+        self._buf = b""
+        self._seen_start = False
+
+    def feed(self, chunk) -> bytes:
+        data = chunk if isinstance(chunk, bytes) else str(chunk).encode()
+        self._buf += data
+        out = b""
+        while b"\n\n" in self._buf:
+            block, self._buf = self._buf.split(b"\n\n", 1)
+            block += b"\n\n"
+            if b"event: message_start" in block or b'"type": "message_start"' in block:
+                if self._seen_start:
+                    continue
+                self._seen_start = True
+            out += block
+        return out
+
+    def flush(self) -> bytes:
+        tail, self._buf = self._buf, b""
+        return tail
+
+
 def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
     app = FastAPI(title="saint", version="0.1.0")
     app.state.cfg = cfg
@@ -738,15 +769,24 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
             async def gen():
                 tracker = SseUsageTracker()
+                dedupe = _MessageStartDedupe()   # litellm's messages→completion translation emits
+                                                 # message_start twice; Anthropic clients expect one
                 success_local = False
                 error_kind_local: str | None = None
                 try:
                     if first_chunk is not None:
                         tracker.feed(first_chunk)
-                        yield first_chunk
+                        out0 = dedupe.feed(first_chunk)
+                        if out0:
+                            yield out0
                         async for chunk in upstream:
                             tracker.feed(chunk)
-                            yield chunk  # relay ORIGINAL bytes untouched
+                            out = dedupe.feed(chunk)   # ORIGINAL bytes, minus a repeated message_start
+                            if out:
+                                yield out
+                        tail = dedupe.flush()
+                        if tail:
+                            yield tail
                     success_local = True
                 except Exception as e:
                     success_local = False
@@ -811,6 +851,38 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                    else result.value.model_dump())
         return JSONResponse(content=payload,
                             headers=_route_headers(decision, result.backend, result.eff))
+
+    @app.post("/v1/messages/count_tokens")
+    async def anthropic_count_tokens(request: Request) -> Any:
+        """Anthropic count_tokens for Anthropic-native clients (Claude Code calls it for
+        context accounting and 404s otherwise). Counts with the local chat seat's tokenizer
+        (vLLM /tokenize) — a close-enough estimate for every backend — and falls back to a
+        chars/4 estimate when no local seat answers. Never routes or bills."""
+        from saint.anthropic_api import anthropic_error, openai_view
+        from saint.config import resolve_backend
+        body = await request.json()
+        msgs = openai_view(body)
+        for t in body.get("tools") or []:      # tool schemas are part of the prompt
+            msgs.append({"role": "system", "content": json.dumps(t)[:20000]})
+        text_len = sum(len(m["content"]) if isinstance(m.get("content"), str)
+                       else len(json.dumps(m.get("content") or "")) for m in msgs)
+        estimate = max(1, text_len // 4)
+        for name in ("local-chat", "local-coder"):
+            b = resolve_backend(cfg, name)
+            if b is None or not b.base_url:
+                continue
+            try:
+                import httpx
+                url = b.base_url.rstrip("/") + "/tokenize"
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    plain = [{"role": m["role"], "content": m["content"] if isinstance(m.get("content"), str)
+                              else json.dumps(m.get("content") or "")} for m in msgs]
+                    r = await client.post(url, json={"model": b.model, "messages": plain})
+                    if r.status_code == 200 and isinstance(r.json().get("count"), int):
+                        return JSONResponse(content={"input_tokens": int(r.json()["count"])})
+            except Exception:
+                continue
+        return JSONResponse(content={"input_tokens": estimate})
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Any:
