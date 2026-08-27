@@ -182,6 +182,13 @@ def _shape_request(backend: BackendConfig, kwargs: dict[str, Any]) -> dict[str, 
         kwargs.pop(k, None)
     if backend.default_max_tokens is not None:
         kwargs.setdefault("max_tokens", backend.default_max_tokens)
+    # chat_template_kwargs is a vLLM/llama.cpp extension, not an OpenAI param: litellm only
+    # delivers it inside `extra_body`, and Anthropic/Bedrock reject it outright.
+    ctk = kwargs.pop("chat_template_kwargs", None)
+    if ctk and backend.provider not in ("anthropic", "bedrock"):
+        extra = dict(kwargs.get("extra_body") or {})
+        extra.setdefault("chat_template_kwargs", ctk)
+        kwargs["extra_body"] = extra
     return kwargs
 
 

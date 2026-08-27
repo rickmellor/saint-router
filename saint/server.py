@@ -38,6 +38,11 @@ _FORWARDED_PARAMS = (
     "seed",
     "stream_options",
     "user",
+    # vLLM/llama.cpp template knobs (enable_thinking, reasoning_effort …). Forwarded as
+    # `extra_body` to OpenAI-compatible backends and dropped for anthropic/bedrock — see
+    # backends._shape_request. Without this a client's `enable_thinking: false` never reached
+    # the seat, so a 200-token review request came back all reasoning, no content (2026-08-27).
+    "chat_template_kwargs",
 )
 
 
