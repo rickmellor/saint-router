@@ -17,6 +17,7 @@ from saint.explain import format_decision
 from saint.johnny import build_resolver, provide_telemetry
 from saint.prefixes import UnknownPrefixError
 from saint.router import SAINT_AUTO, decide_route, dispatch_non_streaming
+from saint import savings as _savings
 from saint.backends import call_embeddings
 from saint.dispatch import BedrockRuntime, dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
@@ -374,6 +375,18 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         # session_id (body field or x-session-id header) keys conversation affinity;
         # it is never forwarded upstream (absent from _FORWARDED_PARAMS).
         session_id = request.headers.get("x-session-id") or body.get("session_id")
+
+        # Reserved model: saint-savings[:period] returns the cost-savings report as the
+        # completion — no routing, no LLM, no cost (like saint-explain). Period comes from
+        # the model suffix or the last user message; defaults to 'day'.
+        if model_field == "saint-savings" or model_field.startswith("saint-savings:"):
+            period = (model_field.split(":", 1)[1] if ":" in model_field
+                      else next((m.get("content", "") for m in reversed(messages)
+                                 if m.get("role") == "user"), "")).strip().lower() or "day"
+            if period not in _savings.PERIODS:
+                period = "day"
+            rep = _savings.compute(app.state.db, cfg, period=period)
+            return _explain_response(_savings.render(rep, color=True), model_field)
 
         try:
             decision = await decide_route(
