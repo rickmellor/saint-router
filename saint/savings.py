@@ -66,8 +66,18 @@ class Row:
     tokens_out: int
     tok_s: float | None
     elec_per_mtok: float | None   # local only
-    actual_cost: float            # $ actually spent (cloud) or burned in power (local)
-    cloud_equiv: float | None     # what the baseline cloud backend would have charged
+    actual_cost: float            # $ actually spent: cache-aware Anthropic bill (cloud) or power (local)
+    cloud_equiv: float | None     # what the baseline cloud backend would have charged (uncached)
+    no_cache_cost: float | None = None   # cloud list-price ignoring cache (for the caching breakdown)
+
+
+def _eff_cache_prices(b):
+    """(cache_read, cache_write) $/Mtok: explicit config, else Anthropic's 0.1x/1.25x of
+    price_in (matches saint log stats), else 0 for non-caching providers."""
+    is_ant = getattr(b, "provider", None) in ("anthropic", "bedrock")
+    cr = b.price_cache_read if b.price_cache_read is not None else (0.1 * b.price_in if is_ant else 0.0)
+    cw = b.price_cache_write if b.price_cache_write is not None else (1.25 * b.price_in if is_ant else 0.0)
+    return cr, cw
 
 
 def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict:
@@ -99,9 +109,14 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
             rows.append(Row(name, "local", r["requests"], tin, tout, tok_s, elec,
                             actual, (tin * base_in + tout * base_out) / 1e6 if bb else None))
         elif b and b.price_in is not None:
-            actual = (tin * b.price_in + tout * (b.price_out or 0.0)) / 1e6
+            po = b.price_out or 0.0
+            crd, cwr = r["cache_read"], r["cache_write"]
+            cr_p, cw_p = _eff_cache_prices(b)
+            uncached_in = max(tin - crd - cwr, 0)
+            real = (uncached_in * b.price_in + crd * cr_p + cwr * cw_p + tout * po) / 1e6  # Anthropic bill
+            no_cache = (tin * b.price_in + tout * po) / 1e6                                # list, no caching
             rows.append(Row(name, "cloud", r["requests"], tin, tout, None, None,
-                            actual, (tin * base_in + tout * base_out) / 1e6 if bb else None))
+                            real, (tin * base_in + tout * base_out) / 1e6 if bb else None, no_cache))
         else:
             rows.append(Row(name, "other", r["requests"], tin, tout, None, None, 0.0, None))
 
@@ -111,9 +126,12 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
     # what an all-cloud-baseline world would have paid for the LOCAL traffic, minus its
     # energy bill = the savings the local fleet produced
     local_savings = local_cloud_equiv - local_cost
-    # bonus: routing cloud traffic to cheaper-than-baseline tiers
-    tier_savings = sum((x.cloud_equiv or 0.0) - x.actual_cost
+    # split the cloud savings cleanly: cheaper-tier routing (baseline vs own list price,
+    # both uncached) and prompt caching (own list price vs what Anthropic actually billed)
+    tier_savings = sum((x.cloud_equiv or 0.0) - (x.no_cache_cost or 0.0)
                        for x in rows if x.kind == "cloud" and x.cloud_equiv is not None)
+    caching_saved = sum((x.no_cache_cost or 0.0) - x.actual_cost
+                        for x in rows if x.kind == "cloud")
     total_actual = cloud_cost + local_cost
     total_if_all_cloud = local_cloud_equiv + sum((x.cloud_equiv or 0.0)
                                                  for x in rows if x.kind == "cloud")
@@ -129,6 +147,7 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
         "local_cloud_equiv": local_cloud_equiv,
         "local_savings": local_savings,
         "tier_savings": tier_savings,
+        "caching_saved": caching_saved,
         "total_actual": total_actual,
         "total_if_all_cloud": total_if_all_cloud,
         "savings": savings,
@@ -228,7 +247,8 @@ def render(rep: dict, color: bool = True) -> str:
     out.append(f"     {c('save') if sav >= 0 else c('red')}{c('bold')}"
                f"{rep['savings_pct']:.0f}% saved vs all-cloud{R}")
     out.append(f"     {c('dim')}from  local fleet {_money(rep['local_savings'])}"
-               f"  ·  cheaper tiers {_money(rep['tier_savings'])}{R}")
+               f"  ·  cheaper tiers {_money(rep['tier_savings'])}"
+               f"  ·  prompt caching {_money(rep['caching_saved'])}{R}")
     out.append("")
 
     # per-backend breakdown
