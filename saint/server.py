@@ -327,6 +327,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                        if cfg.cache.conversation_affinity else None),
     )
     app.state.breaker = Breaker(cfg.routing.breaker_failures, cfg.routing.breaker_cooldown_s)
+    from collections import deque as _deque
+    app.state.recent_decisions = _deque(maxlen=300)   # per-request routing outcomes for /decisions
     app.state.bedrock_state = BedrockRuntime()
     if cfg.has_bedrock:
         from saint.bedrock_auth import apply_bedrock_auth_patch
@@ -342,6 +344,43 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 for mid in ids
             ],
         }
+
+    def _remember_decision(decision, *, served, session_id, model_field, latency_ms, usage, api):
+        """Keep the routing outcome of a request for clients that can't read response headers
+        (Claude Code's status line polls GET /decisions/last?session=…)."""
+        try:
+            out = decision.classifier_outcome
+            res = out.result if out else None
+            app.state.recent_decisions.append({
+                "ts": time.time(), "api": api, "request_id": decision.request_id[:8],
+                "session_id": session_id, "model_field": model_field,
+                "backend": served or decision.backend, "routed": decision.backend,
+                "fallback": bool(served and served != decision.backend),
+                "pinned": decision.pinned_backend, "urgency": decision.urgency,
+                "domain": getattr(res, "domain", None), "complexity": getattr(res, "complexity", None),
+                "classifier": out.classifier_used if out else None,
+                "served_model": None, "latency_ms": latency_ms,
+                "tokens_in": (usage or {}).get("input_tokens") or (usage or {}).get("prompt_tokens"),
+                "tokens_out": (usage or {}).get("output_tokens") or (usage or {}).get("completion_tokens"),
+            })
+        except Exception:
+            pass
+
+    @app.get("/decisions/last")
+    async def decisions_last(session: str | None = None) -> dict[str, Any]:
+        """The newest routing decision, optionally for one client session (substring match on
+        the session id SAINT saw — Claude Code's metadata.user_id embeds its session_id)."""
+        items = list(app.state.recent_decisions)
+        if session:
+            for d in reversed(items):
+                if d.get("session_id") and session in str(d["session_id"]):
+                    return {"match": "session", **d}
+        return {"match": "latest", **items[-1]} if items else {"match": "none"}
+
+    @app.get("/decisions/recent")
+    async def decisions_recent(n: int = 20) -> list[dict[str, Any]]:
+        items = list(app.state.recent_decisions)
+        return items[-max(1, min(n, 300)):]
 
     @app.get("/status")
     async def status() -> dict[str, Any]:
@@ -613,6 +652,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         usage = _usage_dict(response)
         cache_read, cache_write = _cache_tokens(usage)
+        _remember_decision(decision, served=(result.backend if result else None),
+                           session_id=session_id, model_field=model_field,
+                           latency_ms=backend_latency_ms, usage=usage, api="chat")
         _safe_log(app.state.db, build_log_row(
             decision=decision, model_field=model_field,
             backend_latency_ms=backend_latency_ms,
@@ -725,6 +767,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         def _log_messages_row(*, served, eff, latency_ms, success, error_kind, usage,
                               backend_override):
+            _remember_decision(decision, served=served, session_id=session_id,
+                               model_field=client_model, latency_ms=latency_ms, usage=usage,
+                               api="messages")
             _safe_log(app.state.db, build_log_row(
                 decision=decision, model_field=client_model or "anthropic-messages",
                 backend_latency_ms=latency_ms,
