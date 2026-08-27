@@ -243,7 +243,10 @@ def render(rep: dict, color: bool = True) -> str:
         out.append(f"  {kc}{(x.backend + tag):<22}{R}{x.requests:>6}{x.tokens_out:>11,}"
                    f"{c('dim')}{rate:>9}{R}{kc}{_money(x.actual_cost):>10}{R}")
     out.append("")
-    return "\n".join(out)
+    # Flush-left, so a client that .strip()s the response can't misalign line 1
+    # (the margin lived only as a leading 2 spaces per line; relative indent is kept).
+    text = "\n".join(out)
+    return "\n".join(ln[2:] if ln.startswith("  ") else ln for ln in text.split("\n"))
 
 
 def _indent(block: str, n: int) -> str:
