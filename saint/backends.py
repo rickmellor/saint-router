@@ -5,6 +5,14 @@ from typing import Any
 
 import litellm
 
+# Drop OpenAI-style params a target model rejects instead of failing the dispatch.
+# Seen 2026-09-04: litellm raised UnsupportedParamsError("claude-sonnet-5 does not
+# support temperature") on a pinned cloud-medium request, and the on_error fallback
+# then served it from the LOCAL seat — a silent tier downgrade. Per-backend
+# `drop_params` in config.toml still applies on top (explicit blocks only; the auto
+# Anthropic ladder has none), this is the catch-all.
+litellm.drop_params = True
+
 from saint.config import BackendConfig
 from saint.route_cache import content_text
 
