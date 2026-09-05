@@ -114,3 +114,21 @@ def test_append_volatile_lands_after_cache_control_breakpoint():
 def test_append_volatile_creates_user_turn_when_none():
     out = append_volatile([{"role": "system", "content": "s"}], "note")
     assert out[-1] == {"role": "user", "content": [{"type": "text", "text": "note"}]}
+
+
+def test_shape_request_strips_temperature_for_claude5():
+    from saint.backends import _shape_request
+    from saint.config import BackendConfig
+    def mk(name, provider, model, base_url=None):
+        return BackendConfig(name=name, provider=provider, model=model, api_key_env=None, api_key="k",
+                             base_url=base_url, aliases=(), timeout_s=30)
+    b = mk("cloud-medium", "anthropic", "claude-sonnet-5")
+    kw = _shape_request(b, {"model": "claude-sonnet-5", "temperature": 0.2, "max_tokens": 10})
+    assert "temperature" not in kw
+    # Claude 4.x keeps it
+    b4 = mk("cloud-small", "anthropic", "claude-haiku-4-5-20251001")
+    kw4 = _shape_request(b4, {"model": "claude-haiku-4-5-20251001", "temperature": 0.2, "max_tokens": 10})
+    assert kw4["temperature"] == 0.2
+    # local seats untouched
+    bl = mk("local-chat", "openai", "x", base_url="http://localhost:8002/v1")
+    assert _shape_request(bl, {"model": "x", "temperature": 0.2})["temperature"] == 0.2

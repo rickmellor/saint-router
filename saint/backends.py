@@ -13,7 +13,11 @@ import litellm
 # Anthropic ladder has none), this is the catch-all.
 litellm.drop_params = True
 
+import re
+
 from saint.config import BackendConfig
+
+_CLAUDE5_NO_TEMPERATURE = re.compile(r"claude-(sonnet|opus|fable|haiku)-5(\b|[-.])")
 from saint.route_cache import content_text
 
 
@@ -188,6 +192,14 @@ def _shape_request(backend: BackendConfig, kwargs: dict[str, Any]) -> dict[str, 
     max_tokens only when the client omitted one (Bedrock/Anthropic require it)."""
     for k in backend.drop_params:
         kwargs.pop(k, None)
+    # Anthropic rejects `temperature` outright on the Claude 5 family ("`temperature` is
+    # deprecated for this model", invalid_request_error) and litellm's drop_params table
+    # doesn't know that yet, so every cloud-medium/-large/-flagship dispatch that carried a
+    # client temperature 400'd and fell through to on_error (seen 2026-09-04). Strip it
+    # ourselves for those models; the auto-ladder backends have no config block to set
+    # drop_params on.
+    if backend.provider in ("anthropic", "bedrock") and _CLAUDE5_NO_TEMPERATURE.search(kwargs.get("model") or backend.model or ""):
+        kwargs.pop("temperature", None)
     if backend.default_max_tokens is not None:
         kwargs.setdefault("max_tokens", backend.default_max_tokens)
     # chat_template_kwargs is a vLLM/llama.cpp extension, not an OpenAI param: litellm only
