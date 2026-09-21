@@ -170,8 +170,26 @@ async def classify_with_fallback(
     prompt: str,
     max_input_chars: int,
     template: str,
+    oversize: str = "fallback",
 ) -> FallbackOutcome:
     original_len = len(prompt)
+
+    # oversize="truncate": keep the head and the tail (the instruction usually sits at one
+    # end of a long paste) and classify that on the normal primary→fallback chain. The
+    # default hands the whole prompt to the fallback, which only works when the fallback
+    # has the larger context — with a 1B fallback it fails and lands on default_on_failure.
+    if original_len > max_input_chars and oversize == "truncate":
+        head = max_input_chars * 6 // 10
+        clipped = prompt[:head] + "\n[…]\n" + prompt[-(max_input_chars - head):]
+        inner = await classify_with_fallback(
+            primary=primary, fallback=fallback, prompt=clipped,
+            max_input_chars=len(clipped), template=template,
+        )
+        return FallbackOutcome(
+            result=inner.result, classifier_used=inner.classifier_used,
+            fallback_reason=inner.fallback_reason, input_chars=len(clipped),
+            input_truncated_from=original_len,
+        )
 
     # Case 1: oversize and fallback configured → skip primary, full prompt to fallback
     if original_len > max_input_chars and fallback is not None:

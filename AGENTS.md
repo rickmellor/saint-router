@@ -33,10 +33,17 @@ correct. `while_loading` routes to cloud while a seat warms up.
 
 ## Classifier
 
-`mode = "embedding"`: nomic embeddings + trained head, ~ms per request.
-Low-confidence defers to `backend` (haiku — its labels also feed retraining);
-`fallback_backend` (local 1B) is the offline path. Retrain with
-`saint classifier train`.
+`mode = "embedding"`: nomic embeddings (+ optional NVIDIA/lexical features from the
+`saint-features` sidecar, `tools/prompt_features/server.py`) + trained head, ~60 ms.
+Low-confidence defers to `backend` — a LOCAL chat seat on Rick's box, no cloud in the
+classifier path. The rubric is kind-of-work: `hard` = ideation/architecture/validation/
+orchestration (cloud), everything manual is `medium` (local). Retrain with
+`saint classifier train` (reads `classifier.label_files` + logged labels newer than
+`classifier.labels_since`). Details: `docs/local-classifier.md`.
+
+**The repo is PUBLIC.** Logged prompts and anything derived from them (label files,
+adjudicated sets, relabel output) live in `~/.config/saint/classifier_eval/` and never get
+committed.
 
 ## Tests
 

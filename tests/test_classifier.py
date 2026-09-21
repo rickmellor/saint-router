@@ -1,9 +1,11 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from saint.classifier import (
+    ClassifierResult,
     ClassifierError,
     classify,
     classify_with_fallback,
@@ -141,3 +143,20 @@ async def test_both_fail_returns_none_result():
     assert outcome.result is None
     assert outcome.fallback_reason == "primary_error"
     assert outcome.classifier_used is None
+
+
+@pytest.mark.asyncio
+async def test_oversize_truncate_keeps_head_and_tail_on_primary(monkeypatch):
+    seen = {}
+
+    async def fake_classify(backend, *, prompt, template):
+        seen["backend"] = backend.name; seen["prompt"] = prompt
+        return ClassifierResult(domain="general", complexity="medium", reason="", latency_ms=1)
+
+    monkeypatch.setattr("saint.classifier.classify", fake_classify)
+    primary = SimpleNamespace(name="primary"); fallback = SimpleNamespace(name="fallback")
+    outcome = await classify_with_fallback(primary=primary, fallback=fallback, prompt="HEAD" + "x" * 5000 + "TAIL",
+                                           max_input_chars=1000, template="{prompt}", oversize="truncate")
+    assert seen["backend"] == "primary"
+    assert seen["prompt"].startswith("HEAD") and seen["prompt"].endswith("TAIL")
+    assert outcome.input_truncated_from == 5008 and outcome.fallback_reason is None
