@@ -58,6 +58,7 @@ async def _classify_for_route(cfg: Config, prompt: str) -> FallbackOutcome:
         outcome = await classify_with_fallback(
             primary=primary, fallback=fallback, prompt=prompt,
             max_input_chars=cfg.classifier.max_input_chars, template=template,
+            oversize=cfg.classifier.oversize,
         )
         if reason_prefix and outcome.fallback_reason is None:
             outcome = FallbackOutcome(

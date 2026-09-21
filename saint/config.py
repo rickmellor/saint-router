@@ -87,6 +87,7 @@ class ClassifierConfig:
     mode: str = "llm"                     # "llm" | "embedding"
     embedding_backend: str | None = None  # backend serving /v1/embeddings (e.g. nomic-embed via johnny)
     head_path: str | None = None          # trained head .npz (default: ~/.config/saint/classifier_head.npz)
+    oversize: str = "fallback"   # "fallback" (whole prompt → fallback_backend) | "truncate" (head+tail → normal chain)
     min_confidence: float = 0.6           # below this the embedding head defers to the LLM classifier
     ignore_after: tuple[str, ...] = ()    # truncate CLASSIFIER input at the first of these markers
                                           # (client-injected context, e.g. agent memory recall);
@@ -428,6 +429,7 @@ def load_config(path: Path) -> Config:
         backend=cls_raw["backend"],
         fallback_backend=cls_raw.get("fallback_backend"),
         max_input_chars=int(cls_raw.get("max_input_chars", 8000)),
+        oversize=str(cls_raw.get("oversize", "fallback")),
         timeout_s=int(cls_raw.get("timeout_s", 5)),
         prompt_template_path=(
             _expand(cls_raw["prompt_template_path"])

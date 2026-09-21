@@ -98,6 +98,8 @@ embedding_backend = "local-embed"       # required when mode = "embedding"
 min_confidence    = 0.6                 # below this, the head defers to the LLM classifier
 # head_path       = "~/.config/saint/classifier_head.npz"   # trained head (default shown)
 max_input_chars   = 8000                # primary's input cap (head-truncate if no fallback)
+# oversize        = "fallback"          # "fallback": whole prompt → fallback_backend (needs a big-context fallback);
+#                                       # "truncate": head+tail clipped to max_input_chars, normal primary→fallback chain
 timeout_s         = 10                  # allow headroom for a CPU-served classifier seat
 # Agent clients (hermes, opencode, …) often append memory-recall/context blocks to the
 # user message; classifying that blob instead of the request skews routing. List the
