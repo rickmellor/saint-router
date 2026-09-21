@@ -170,3 +170,18 @@ async def test_embed_texts_gives_up_below_the_floor(monkeypatch):
     monkeypatch.setattr(EC, "_embed_raw", _fake_raw(10))   # nothing realistic ever fits
     with pytest.raises(_CtxError):        # surfaces the backend's refusal rather than looping
         await EC.embed_texts(_backend(), ["x" * 8000])
+
+
+def test_head_with_extra_features_roundtrip(tmp_path):
+    """Extras ride after the embedding: only the embedding part is normalized, the spec survives save/load,
+    and a feature that separates the classes is actually used."""
+    rng = np.random.default_rng(0)
+    E = rng.normal(size=(120, 16)); extras = np.zeros((120, 3)); cplx = []
+    for i in range(120):
+        hard = i % 3 == 0; extras[i, 0] = 1.0 if hard else 0.0; cplx.append("hard" if hard else "medium")
+    head = EC.train_head(E, ["code"] * 120, cplx, embed_model="t", extras=extras, feature_spec="x3")
+    assert head.embed_dim == 16 and head.dim == 19 and head.feature_spec == "x3"
+    X = np.hstack([E * 7.0, extras])          # embedding scale must not matter
+    assert sum(head.predict(v)[2] == c for v, c in zip(X, cplx)) >= 118
+    head.save(tmp_path / "h.npz"); h2 = EC.Head.load(tmp_path / "h.npz")
+    assert h2.embed_dim == 16 and h2.feature_spec == "x3" and h2.predict(X[0]) == head.predict(X[0])

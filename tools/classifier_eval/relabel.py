@@ -35,11 +35,13 @@ def prompts() -> list[dict]:
 
 async def main() -> None:
     ap = argparse.ArgumentParser(); ap.add_argument("--template", required=True); ap.add_argument("--backends", default="local-chat,local-coder")
-    ap.add_argument("--out", required=True); ap.add_argument("--concurrency", type=int, default=6); ap.add_argument("--limit", type=int); a = ap.parse_args()
+    ap.add_argument("--out", required=True); ap.add_argument("--concurrency", type=int, default=6); ap.add_argument("--limit", type=int)
+    ap.add_argument("--source", choices=["traffic", "gold"], default="traffic", help="gold = the synthetic seed sets (old author labels kept as `old`)"); a = ap.parse_args()
     cfg = load_config(Path("~/.config/saint/config.toml").expanduser()); tpl = load_prompt_template(a.template); cap = cfg.classifier.max_input_chars
     names = a.backends.split(","); out = Path(a.out)
     done = {json.loads(l)["prompt"] for l in out.read_text().splitlines()} if out.exists() else set()
-    todo = [r for r in prompts() if r["prompt"] not in done][: a.limit]; print(f"{len(done)} done, {len(todo)} to label", flush=True)
+    src = prompts() if a.source == "traffic" else [{"prompt": g["prompt"], "old": [g["domain"], g["complexity"]], "old_by": g["src"], "n": 0, "backends": {}} for g in gold()]
+    todo = [r for r in src if r["prompt"] not in done][: a.limit]; print(f"{len(done)} done, {len(todo)} to label", flush=True)
     sem = {b: asyncio.Semaphore(a.concurrency) for b in names}; lock = asyncio.Lock(); n = 0
     client = httpx.AsyncClient(timeout=180); seat = {}
     for b in names:

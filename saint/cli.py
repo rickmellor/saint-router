@@ -590,7 +590,19 @@ def classifier_train(
     from saint.storage import fetch_training_rows
 
     conn = open_db(Path(cfg.logging.db_path))
-    rows = fetch_training_rows(conn, limit)
+    # Curated label files come first (they win the dedupe); logged labels only from after
+    # classifier.labels_since, so labels made under an older rubric never come back.
+    import json as _json
+    curated: list[tuple] = []
+    for lf in cfg.classifier.label_files:
+        for line in Path(lf).expanduser().read_text().splitlines():
+            if line.strip():
+                o = _json.loads(line)
+                curated.append((o["prompt"], o["domain"], o["complexity"]))
+    rows = curated + list(fetch_training_rows(conn, limit, since=cfg.classifier.labels_since))
+    if curated:
+        typer.echo(f"{len(curated)} curated labels from {len(cfg.classifier.label_files)} file(s) + "
+                   f"{len(rows) - len(curated)} logged since {cfg.classifier.labels_since or 'the beginning'}")
     seen: set[str] = set()
     prompts: list[str] = []
     doms: list[str] = []
@@ -632,7 +644,19 @@ def classifier_train(
         typer.echo(f"  note: {len(shrunk)} prompt(s) exceeded '{eb_name}' context and were "
                    f"truncated to fit (largest {max(o for o, _ in shrunk)} chars)")
 
-    head = EC.train_head(X, doms, cplxs, embed_model=str(embed_backend.model))
+    extras = None
+    if cfg.classifier.feature_url:
+        from saint import prompt_features as PF
+        typer.echo(f"fetching prompt features from {cfg.classifier.feature_url}…")
+        try:
+            extras = asyncio.run(PF.extras(cfg.classifier.feature_url, prompts))
+        except Exception as e:
+            typer.secho(f"feature sidecar failed: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from None
+        X = np.hstack([X, extras])
+    head = EC.train_head(X[:, :X.shape[1] - (0 if extras is None else extras.shape[1])], doms, cplxs,
+                         embed_model=str(embed_backend.model), extras=extras,
+                         feature_spec=PF.SPEC if extras is not None else "")
     out = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
     head.save(out)
     d_ok = sum(head.predict(v)[0] == d for v, d in zip(X, doms))
@@ -809,6 +833,10 @@ def classifier_status(
                 return np.vstack(chunks)
 
             X = asyncio.run(_embed())
+            if head.feature_spec:   # feature-augmented head: replay needs the same extras
+                import numpy as np
+                from saint import prompt_features as PF
+                X = np.hstack([X, asyncio.run(PF.extras(cfg.classifier.feature_url or "", prompts))])
             if shrunk:
                 say(f"  note: {len(shrunk)} row(s) exceeded {eb_name}'s context window and were "
                     f"truncated to fit (largest {max(o for o, _ in shrunk)} chars)")

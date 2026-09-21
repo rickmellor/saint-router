@@ -14,6 +14,7 @@ ambiguous tail.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +25,8 @@ import numpy as np
 from saint.backends import _resolve_api_key, _resolve_model_id
 from saint.classifier import ClassifierResult
 from saint.config import BackendConfig
+
+log = logging.getLogger(__name__)
 
 DEFAULT_HEAD_PATH = "~/.config/saint/classifier_head.npz"
 
@@ -104,6 +107,13 @@ def _normalize(x: np.ndarray) -> np.ndarray:
     return x / np.clip(norm, 1e-8, None)
 
 
+def _prep(v: np.ndarray, embed_dim: int) -> np.ndarray:
+    """L2-normalize the embedding part only; extra features pass through as they are."""
+    if not embed_dim or embed_dim >= v.shape[-1]:
+        return _normalize(v)
+    return np.concatenate([_normalize(v[..., :embed_dim]), v[..., embed_dim:]], axis=-1)
+
+
 def _softmax(z: np.ndarray) -> np.ndarray:
     z = z - z.max(axis=-1, keepdims=True)
     e = np.exp(z)
@@ -154,10 +164,13 @@ class Head:
     complexity_classes: list[str]
     W_complexity: np.ndarray
     b_complexity: np.ndarray
+    embed_dim: int = 0          # leading columns that are the embedding (0 = all of `dim`: legacy heads)
+    feature_spec: str = ""      # extra trailing features the head expects (saint.prompt_features.SPEC) or ""
 
     def predict(self, vec: np.ndarray) -> tuple[str, float, str, float]:
-        """(domain, domain_conf, complexity, complexity_conf) for one (already-embedded) vector."""
-        v = _normalize(np.asarray(vec, dtype=np.float64))
+        """(domain, domain_conf, complexity, complexity_conf) for one vector: the embedding,
+        followed by the head's extra features when it was trained with any."""
+        v = _prep(np.asarray(vec, dtype=np.float64), self.embed_dim)
         dl, dc = _predict_one(v, self.W_domain, self.b_domain, self.domain_classes)
         cl, cc = _predict_one(v, self.W_complexity, self.b_complexity, self.complexity_classes)
         return dl, dc, cl, cc
@@ -171,6 +184,7 @@ class Head:
             domain_classes=np.array(self.domain_classes), W_domain=self.W_domain, b_domain=self.b_domain,
             complexity_classes=np.array(self.complexity_classes),
             W_complexity=self.W_complexity, b_complexity=self.b_complexity,
+            embed_dim=self.embed_dim, feature_spec=self.feature_spec,
         )
 
     @classmethod
@@ -183,13 +197,18 @@ class Head:
             W_domain=d["W_domain"], b_domain=d["b_domain"],
             complexity_classes=[str(x) for x in d["complexity_classes"]],
             W_complexity=d["W_complexity"], b_complexity=d["b_complexity"],
+            embed_dim=int(d["embed_dim"]) if "embed_dim" in d else 0,
+            feature_spec=str(d["feature_spec"]) if "feature_spec" in d else "",
         )
 
 
 def train_head(embeddings: np.ndarray, domain_labels: list[str], complexity_labels: list[str],
-               *, embed_model: str) -> Head:
-    """Fit both axes from distilled labels. `embeddings` is (n, dim); labels are parallel lists."""
-    X = _normalize(np.asarray(embeddings, dtype=np.float64))
+               *, embed_model: str, extras: np.ndarray | None = None, feature_spec: str = "") -> Head:
+    """Fit both axes from distilled labels. `embeddings` is (n, dim); labels are parallel lists.
+    `extras` (n, k) are optional extra features appended after the normalized embedding."""
+    embed_dim = 0 if extras is None else int(np.asarray(embeddings).shape[1])
+    X = np.asarray(embeddings, dtype=np.float64)
+    X = _normalize(X) if extras is None else np.hstack([_normalize(X), np.asarray(extras, dtype=np.float64)])
     dom_classes = sorted(set(domain_labels))
     cplx_classes = sorted(set(complexity_labels))
     dom_idx = np.array([dom_classes.index(x) for x in domain_labels])
@@ -201,17 +220,28 @@ def train_head(embeddings: np.ndarray, domain_labels: list[str], complexity_labe
         trained_at=datetime.now(UTC).isoformat(),
         domain_classes=dom_classes, W_domain=Wd, b_domain=bd,
         complexity_classes=cplx_classes, W_complexity=Wc, b_complexity=bc,
+        embed_dim=embed_dim, feature_spec=feature_spec if extras is not None else "",
     )
 
 
 # --------------------------------------------------------------------------- classify
 async def classify(head: Head, embed_backend: BackendConfig, *, prompt: str,
-                   min_confidence: float) -> ClassifierResult | None:
+                   min_confidence: float, feature_url: str | None = None) -> ClassifierResult | None:
     """Embed + predict. Returns a ClassifierResult, or None when either axis is below
     `min_confidence` (the signal for the router to fall back to the LLM classifier)."""
     started = time.monotonic()
     X = await embed_texts(embed_backend, [prompt])
-    dl, dc, cl, cc = head.predict(X[0])
+    vec = X[0]
+    if head.feature_spec:
+        from saint import prompt_features as PF
+        if not feature_url or head.feature_spec != PF.SPEC:
+            return None                      # head needs features we can't supply → LLM classifier
+        try:
+            vec = np.concatenate([vec, (await PF.extras(feature_url, [prompt]))[0]])
+        except Exception as e:  # noqa: BLE001 — sidecar down/slow: abstain, never fail the request
+            log.warning("prompt-features sidecar unavailable (%s) — deferring to the LLM classifier", e)
+            return None
+    dl, dc, cl, cc = head.predict(vec)
     latency_ms = int((time.monotonic() - started) * 1000)
     conf = min(dc, cc)
     if conf < min_confidence:

@@ -88,6 +88,9 @@ class ClassifierConfig:
     embedding_backend: str | None = None  # backend serving /v1/embeddings (e.g. nomic-embed via johnny)
     head_path: str | None = None          # trained head .npz (default: ~/.config/saint/classifier_head.npz)
     oversize: str = "fallback"   # "fallback" (whole prompt → fallback_backend) | "truncate" (head+tail → normal chain)
+    feature_url: str | None = None        # saint-features sidecar (tools/prompt_features); enables the feature-augmented head
+    label_files: tuple[str, ...] = ()     # jsonl {prompt, domain, complexity}: curated labels `classifier train` always includes
+    labels_since: str | None = None       # ISO-8601 UTC: ignore logged labels older than this (e.g. a rubric change)
     min_confidence: float = 0.6           # below this the embedding head defers to the LLM classifier
     ignore_after: tuple[str, ...] = ()    # truncate CLASSIFIER input at the first of these markers
                                           # (client-injected context, e.g. agent memory recall);
@@ -430,6 +433,9 @@ def load_config(path: Path) -> Config:
         fallback_backend=cls_raw.get("fallback_backend"),
         max_input_chars=int(cls_raw.get("max_input_chars", 8000)),
         oversize=str(cls_raw.get("oversize", "fallback")),
+        feature_url=cls_raw.get("feature_url"),
+        label_files=tuple(cls_raw.get("label_files", ())),
+        labels_since=cls_raw.get("labels_since"),
         timeout_s=int(cls_raw.get("timeout_s", 5)),
         prompt_template_path=(
             _expand(cls_raw["prompt_template_path"])

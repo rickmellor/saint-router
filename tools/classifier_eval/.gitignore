@@ -2,3 +2,4 @@ relabel-*.jsonl
 adjudicated*.jsonl
 *.npz
 __pycache__/
+*.pkl
