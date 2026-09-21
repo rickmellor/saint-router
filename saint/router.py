@@ -67,28 +67,60 @@ async def _classify_for_route(cfg: Config, prompt: str) -> FallbackOutcome:
             )
         return outcome
 
-    if cfg.classifier.mode != "embedding":
+    text = prompt[: cfg.classifier.max_input_chars]
+    truncated_from = len(prompt) if len(prompt) > len(text) else None
+
+    async def _embedding(reason_prefix: str | None) -> FallbackOutcome:
+        """The local embedding head, deferring to the LLM labeller. `reason_prefix` records why
+        we got here when it was not the first choice (e.g. 'jev_defer')."""
+        from saint import embed_classifier as EC
+
+        def _why(r: str) -> str:
+            return f"{reason_prefix}+{r}" if reason_prefix else r
+
+        head = _load_head(cfg.classifier.head_path)
+        embed_backend = cfg.backends.get(cfg.classifier.embedding_backend or "")
+        if head is None or embed_backend is None:
+            return await _llm(_why("embedding_untrained"))
+        try:
+            result = await EC.classify(head, embed_backend, prompt=text, min_confidence=cfg.classifier.min_confidence)
+        except Exception as e:
+            _log_classifier_failure(embed_backend.name, ClassifierError(str(e)))
+            return await _llm(_why("embedding_error"))
+        if result is None:  # head not confident enough — defer to the LLM
+            return await _llm(_why("embedding_defer"))
+        return FallbackOutcome(
+            result=result, classifier_used=f"{embed_backend.name} (embed-head)",
+            fallback_reason=reason_prefix, input_chars=len(text), input_truncated_from=truncated_from,
+        )
+
+    mode = cfg.classifier.mode
+    if mode == "embedding":
+        return await _embedding(None)
+    if mode != "jev":
         return await _llm(None)
 
-    from saint import embed_classifier as EC
+    # mode == "jev": hosted System One classifier first; unsure or unavailable → the local
+    # embedding head (when configured) → the LLM labeller. The older classifiers stay in the
+    # chain on purpose: Jev is a remote API, so an outage must cost accuracy, not routing.
+    from saint import jev_classifier as JC
 
-    head = _load_head(cfg.classifier.head_path)
-    embed_backend = cfg.backends.get(cfg.classifier.embedding_backend or "")
-    if head is None or embed_backend is None:
-        return await _llm("embedding_untrained")
-
-    text = prompt[: cfg.classifier.max_input_chars]
+    settings = JC.JevSettings(
+        api_key_env=cfg.classifier.jev_api_key_env, model=cfg.classifier.jev_model,
+        base_url=cfg.classifier.jev_base_url, timeout_s=cfg.classifier.jev_timeout_s,
+        min_confidence=cfg.classifier.jev_min_confidence,
+    )
+    has_embedding = bool(cfg.classifier.embedding_backend)
     try:
-        result = await EC.classify(head, embed_backend, prompt=text, min_confidence=cfg.classifier.min_confidence)
+        result = await JC.classify(text, settings=settings, min_confidence=cfg.classifier.min_confidence)
     except Exception as e:
-        _log_classifier_failure(embed_backend.name, ClassifierError(str(e)))
-        return await _llm("embedding_error")
-    if result is None:  # head not confident enough — defer to the LLM
-        return await _llm("embedding_defer")
+        _log_classifier_failure(JC.CLASSIFIER_USED, ClassifierError(str(e)))
+        return await (_embedding("jev_error") if has_embedding else _llm("jev_error"))
+    if result is None:
+        return await (_embedding("jev_defer") if has_embedding else _llm("jev_defer"))
     return FallbackOutcome(
-        result=result, classifier_used=f"{embed_backend.name} (embed-head)",
-        fallback_reason=None, input_chars=len(text),
-        input_truncated_from=(len(prompt) if len(prompt) > len(text) else None),
+        result=result, classifier_used=JC.CLASSIFIER_USED,
+        fallback_reason=None, input_chars=len(text), input_truncated_from=truncated_from,
     )
 
 def _outcome_from_labels(labels: CachedLabels, used: str, clf_input: str) -> FallbackOutcome:

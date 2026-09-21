@@ -163,7 +163,9 @@ def fetch_training_rows(
 
     Excludes rows labeled by the embedding head itself (no self-distillation feedback
     loop) and by the routing caches ('cache'/'inherited' — reused labels, not fresh
-    classifier judgments). `since` restricts to rows after an ISO-8601 UTC timestamp
+    classifier judgments). Rows labeled by the hosted Jev classifier are excluded too: it
+    is an unverified teacher until an A/B says otherwise, and the drift check must keep
+    measuring the head against the LLM labeller, not against Jev. `since` restricts to rows after an ISO-8601 UTC timestamp
     (drift checks use the head's trained_at so the sample isn't its own training set)."""
     return conn.execute(
         "SELECT prompt_content, classifier_domain, classifier_complexity FROM requests "
@@ -172,6 +174,7 @@ def fetch_training_rows(
         "AND ts > ? "
         "AND (classifier_used IS NULL OR ("
         "  classifier_used NOT LIKE '%embed-head%' "
+        "  AND classifier_used NOT LIKE '%jev%' "
         "  AND classifier_used NOT IN ('cache', 'inherited')"
         ")) "
         "ORDER BY id DESC LIMIT ?",

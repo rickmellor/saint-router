@@ -84,10 +84,15 @@ class ClassifierConfig:
     max_input_chars: int
     timeout_s: int
     prompt_template_path: str | None
-    mode: str = "llm"                     # "llm" | "embedding"
+    mode: str = "llm"                     # "llm" | "embedding" | "jev" (jev falls through to embedding → llm)
     embedding_backend: str | None = None  # backend serving /v1/embeddings (e.g. nomic-embed via johnny)
     head_path: str | None = None          # trained head .npz (default: ~/.config/saint/classifier_head.npz)
     min_confidence: float = 0.6           # below this the embedding head defers to the LLM classifier
+    jev_model: str = "jev-1.13.0"          # mode="jev": pinned TypeSafe model id (aliases drift)
+    jev_api_key_env: str = "TYPESAFE_API_KEY"  # env var holding the key (never the key itself)
+    jev_base_url: str = "https://api.typesafe.ai"
+    jev_timeout_s: float = 3.0            # hot path — a slow Jev loses to the local head
+    jev_min_confidence: float | None = None    # None → min_confidence
     ignore_after: tuple[str, ...] = ()    # truncate CLASSIFIER input at the first of these markers
                                           # (client-injected context, e.g. agent memory recall);
                                           # dispatch always forwards the full message untouched
@@ -191,9 +196,11 @@ def _validate(cfg: Config) -> list[str]:
         errors.append(
             f"classifier.fallback_backend '{fb}' is not defined in [backends]"
         )
-    if cfg.classifier.mode not in ("llm", "embedding"):
-        errors.append(f"classifier.mode '{cfg.classifier.mode}' must be 'llm' or 'embedding'")
-    if cfg.classifier.mode == "embedding":
+    if cfg.classifier.mode not in ("llm", "embedding", "jev"):
+        errors.append(f"classifier.mode '{cfg.classifier.mode}' must be 'llm', 'embedding' or 'jev'")
+    # mode="jev" keeps the embedding head as its fall-through when one is configured, but does
+    # not require it: with no embedding_backend, Jev defers straight to the LLM labeller.
+    if cfg.classifier.mode == "embedding" or (cfg.classifier.mode == "jev" and cfg.classifier.embedding_backend):
         eb = cfg.classifier.embedding_backend
         if not eb:
             errors.append("classifier.embedding_backend is required when classifier.mode = 'embedding'")
@@ -437,6 +444,11 @@ def load_config(path: Path) -> Config:
         embedding_backend=cls_raw.get("embedding_backend"),
         head_path=_expand(cls_raw["head_path"]) if cls_raw.get("head_path") else None,
         min_confidence=float(cls_raw.get("min_confidence", 0.6)),
+        jev_model=cls_raw.get("jev_model", "jev-1.13.0"),
+        jev_api_key_env=cls_raw.get("jev_api_key_env", "TYPESAFE_API_KEY"),
+        jev_base_url=cls_raw.get("jev_base_url", "https://api.typesafe.ai"),
+        jev_timeout_s=float(cls_raw.get("jev_timeout_s", 3.0)),
+        jev_min_confidence=(float(cls_raw["jev_min_confidence"]) if cls_raw.get("jev_min_confidence") is not None else None),
         ignore_after=tuple(cls_raw.get("ignore_after", ())),
     )
 

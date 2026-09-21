@@ -84,6 +84,20 @@ saint classifier status --drift     # replay the head vs recent LLM labels (boun
 saint classifier status --json      # machine-readable, for monitoring jobs (`healthy` bool)
 ```
 
+### Classifier modes (`[classifier] mode`)
+
+| mode | first choice | when unsure or unavailable |
+|---|---|---|
+| `"llm"` | the LLM labeller (`classifier.backend`) | its `fallback_backend` |
+| `"embedding"` | the local embedding head | the LLM labeller |
+| `"jev"` | TypeSafe AI's hosted **Jev** System One model — one call, both axes, calibrated confidence | the embedding head (when `embedding_backend` is set), then the LLM labeller |
+
+Switching is one line plus a restart (`systemctl --user restart saint.service`); no mode removes another.
+`"jev"` needs `TYPESAFE_API_KEY` in `~/.config/saint/env` and sends the (trimmed) last user message to
+`api.typesafe.ai` — see [docs/jev-classifier.md](docs/jev-classifier.md) for the evaluation, knobs
+(`jev_model`, `jev_timeout_s`, `jev_min_confidence`, `jev_api_key_env`, `jev_base_url`) and caveats.
+Jev-labelled rows are excluded from head training and from the drift check.
+
 ### Drift notification
 
 `saint classifier status --drift` replays the current head against recent LLM-labeled rows that
