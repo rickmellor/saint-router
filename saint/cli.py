@@ -68,6 +68,9 @@ def serve(
         )
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # SO_REUSEADDR like uvicorn itself: a lingering TIME_WAIT on the port (normal right
+    # after a restart that cut off a streaming client) must not fail the pre-flight.
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind((bind_host, bind_port))
     except OSError:
