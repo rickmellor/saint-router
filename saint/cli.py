@@ -265,6 +265,40 @@ def savings(
 
 
 
+@app.command("drain")
+def drain(
+    seats: list[str] = typer.Argument(None, help="Seat names, ports or johnny roles to drain (omit with --list)."),
+    off: bool = typer.Option(False, "--off", help="Stop draining these (same as `saint undrain`)."),
+    list_: bool = typer.Option(False, "--list", help="Show what is draining and its in-flight load."),
+):
+    """Gently take a seat out of rotation: SAINT stops routing NEW requests to it (own role spills elsewhere, and it
+    is never a spill target) while it stays up for its in-flight work. No restart. `johnny down --drain <seat>`
+    drains, waits for idle, then stops the seat and undrains it."""
+    from saint.drain import drain_file, load_drain, set_drain
+    from saint.johnny import seat_load
+
+    if list_ or not seats:
+        cur = sorted(load_drain())
+        if not cur:
+            print(f"nothing draining ({drain_file()})"); return
+        for n in cur:
+            load = seat_load(f"http://127.0.0.1:{n}/v1") if n.isdigit() else None
+            m = __import__("re").search(r"-(\d{4,5})$", n)
+            if load is None and m: load = seat_load(f"http://127.0.0.1:{m.group(1)}/v1")
+            print(f"{n:48s} in-flight: {'?' if load is None else load}")
+        return
+    cur = set_drain(list(seats), on=not off)
+    print(("draining: " if not off else "undrained; still draining: ") + (", ".join(sorted(cur)) or "-"))
+
+
+@app.command("undrain")
+def undrain(seats: list[str] = typer.Argument(..., help="Seat names, ports or roles to put back in rotation.")):
+    """Put drained seats back in rotation."""
+    from saint.drain import set_drain
+    cur = set_drain(list(seats), on=False)
+    print("still draining: " + (", ".join(sorted(cur)) or "-"))
+
+
 @app.command("spills")
 def spills(
     period: str = typer.Option("day", "--period", "-p", help="hour | day | week | month | all"),

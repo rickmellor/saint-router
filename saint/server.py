@@ -267,6 +267,8 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
         h["x-saint-spill"] = f"{eff.spilled_from}->{eff.johnny_seat}"
     if eff is not None and getattr(eff, "seat_load", None) is not None:
         h["x-saint-seat-load"] = str(eff.seat_load)
+    if eff is not None and getattr(eff, "drained", None):
+        h["x-saint-drain"] = eff.drained
     return {k: _header_safe(v) for k, v in h.items()}
 
 
@@ -389,6 +391,21 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
     async def decisions_recent(n: int = 20) -> list[dict[str, Any]]:
         items = list(app.state.recent_decisions)
         return items[-max(1, min(n, 300)):]
+
+    @app.get("/admin/drain")
+    async def drain_list() -> dict[str, Any]:
+        """Seats/ports/roles SAINT is steering new requests away from (`saint drain`)."""
+        from saint.drain import drain_file, load_drain
+        return {"draining": sorted(load_drain()), "file": str(drain_file())}
+
+    @app.post("/admin/drain")
+    async def drain_set(body: dict[str, Any]) -> dict[str, Any]:
+        """{"seat": "<name|port|role>", "on": true|false} — takes effect on the next dispatch, no restart."""
+        from saint.drain import set_drain
+        seat = str(body.get("seat") or "").strip()
+        if not seat:
+            return {"error": "seat required"}
+        return {"draining": sorted(set_drain([seat], bool(body.get("on", True))))}
 
     @app.get("/status")
     async def status() -> dict[str, Any]:

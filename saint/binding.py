@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, replace
 
 from saint.config import BackendConfig, Config
+from saint.drain import is_draining
 from saint.johnny import JohnnyResolver, seat_load
 
 
@@ -22,7 +23,8 @@ class Effective:
     backend: BackendConfig          # the backend config call_backend should use
     state_at_dispatch: str | None   # johnny_ready | static_baseline | while_loading | fallback | None
     johnny_seat: str | None
-    spilled_from: str | None = None  # the role whose own seat was saturated/not ready when another role's seat served
+    spilled_from: str | None = None  # the role whose own seat was saturated/not ready/draining when another role's seat served
+    drained: str | None = None       # the draining seat this request was steered away from
     seat_load: int | None = None     # requests in flight on the serving seat at dispatch (None = unknown)
 
 
@@ -33,6 +35,8 @@ def _spill(cfg: Config, b: BackendConfig, resolver: JohnnyResolver, own_seat: st
     for role in b.spill:
         r = resolver.resolve(role)
         if r is None or r.state != "ready" or not r.endpoint or not r.model or r.seat == own_seat:
+            continue
+        if is_draining(r.seat, r.endpoint, role):
             continue
         load = seat_load(r.endpoint)
         key = (load if load is not None else 10**6, b.spill.index(role))
@@ -76,6 +80,18 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
     if res.state == "ready" and res.endpoint and res.model:
         # Override the static endpoint/model with johnny's live values. johnny seats are
         # OpenAI-compatible, so default the provider to openai for johnny_only backends.
+        if is_draining(res.seat, res.endpoint, target):
+            # `saint drain <seat>`: the seat stays up for its in-flight work but takes nothing new — a ready spill seat
+            # serves instead, else the normal fallback. Never the draining seat, whatever its load.
+            alt = _spill(cfg, b, resolver, res.seat, None) if b.spill else None
+            if alt is not None:
+                r2, load2 = alt
+                print(f"[saint] drain {res.seat}: {target}→{r2.seat} (load {load2})", file=sys.stderr)
+                eff = replace(b, base_url=r2.endpoint, model=r2.model, provider=b.provider or "openai")
+                return Effective(eff, "johnny_ready", r2.seat, spilled_from=target, seat_load=load2, drained=res.seat)
+            print(f"[saint] drain {res.seat}: no spill seat for '{target}' — fallback", file=sys.stderr)
+            fb = _fallback(cfg, b, res.seat)
+            return replace(fb, drained=res.seat)
         load = seat_load(res.endpoint) if b.spill else None
         if b.spill and load is not None and load >= b.spill_at:
             alt = _spill(cfg, b, resolver, res.seat, load)

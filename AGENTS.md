@@ -29,7 +29,7 @@ live seat via the `johnny` CLI (results cached ~5 s); the static
 `base_url`/`model` in config is the fallback when johnny is absent or the seat
 is down. Under johnny profile `coder`, role `coder` maps to the chat seat
 (Ornith) via role_aliases — no seat literally holds the coder role, and that's
-correct. `while_loading` routes to cloud while a seat warms up. `spill = [roles]` lets a saturated/not-ready role borrow another role's seat (least-loaded ready wins; `chat` is never listed, so never borrowed); spills are logged per request and summarised by `saint spills`. `priority = N` per backend → vLLM request priority (chat 0 / coder 5 / worker 10; seats run `--scheduling-policy priority`).
+correct. `while_loading` routes to cloud while a seat warms up. `spill = [roles]` lets a saturated/not-ready role borrow another role's seat (least-loaded ready wins; all three INT4 seats list each other since 2026-09-23 evening); spills are logged per request and summarised by `saint spills`. `priority = N` per backend → vLLM request priority (chat 0 / coder 5 / worker 10; seats run `--scheduling-policy priority`). `saint drain <seat>` (file `~/.config/saint/drain.json`, no restart) takes a seat out of rotation while it finishes in-flight work; `johnny down --drain` uses it.
 
 ## Classifier
 
