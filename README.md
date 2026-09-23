@@ -17,7 +17,7 @@ saint serve
 ```
 
 Setting `ANTHROPIC_API_KEY` auto-injects the Anthropic ladder — `cloud-small` (Haiku),
-`cloud-medium` (Sonnet), `cloud-large` (Opus), `cloud-flagship` (Fable) — each reachable
+`cloud-medium` (Sonnet), `cloud-large` (Opus), `cloud-exquisite` (Fable; was `cloud-flagship`, renamed 2026-09-23 — aliases `!fable`, `flagship`) — each reachable
 per-message by an alias (`!haiku`, `!sonnet`, `!opus`, `!fable`). An explicit
 `[backends.<name>]` block always overrides the auto entry. Without the key there are no cloud
 backends at all, so a policy that references one fails config validation.
