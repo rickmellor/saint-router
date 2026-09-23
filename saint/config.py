@@ -39,6 +39,8 @@ class BackendConfig:
     # never borrowed. Every spill is logged (spilled_from/spilled_to) — `saint spills`.
     spill: tuple[str, ...] = ()
     spill_at: int = 6
+    # vLLM request priority for this backend's work (lower = sooner; seats need --scheduling-policy priority).
+    priority: int | None = None
     # --- provider = "bedrock" only (validated) ---
     aws_region: str | None = None       # REQUIRED for bedrock backends
     aws_profile: str | None = None      # AWS profile (credential_process/SSO); omit = default chain
@@ -417,6 +419,7 @@ def load_config(path: Path) -> Config:
             on_error=b.get("on_error"),
             spill=tuple(b.get("spill", ())),
             spill_at=int(b.get("spill_at", 6)),
+            priority=int(b["priority"]) if b.get("priority") is not None else None,
             aws_region=b.get("aws_region"),
             aws_profile=b.get("aws_profile"),
             drop_params=tuple(b.get("drop_params", ())),

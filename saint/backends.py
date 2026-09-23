@@ -209,6 +209,16 @@ def _shape_request(backend: BackendConfig, kwargs: dict[str, Any]) -> dict[str, 
         extra = dict(kwargs.get("extra_body") or {})
         extra.setdefault("chat_template_kwargs", ctk)
         kwargs["extra_body"] = extra
+    # vLLM request priority (lower = scheduled sooner; needs `--scheduling-policy priority` on the seat).
+    # Per-backend `priority` stamps the role's work — chat 0 / coder 5 / worker 10 — so an interactive turn
+    # jumps a fan-out's collectors on a shared seat (2026-09-23, all-seats spill). A client-sent `priority` wins.
+    prio = kwargs.pop("priority", None)
+    if prio is None:
+        prio = backend.priority
+    if prio is not None and backend.provider not in ("anthropic", "bedrock"):
+        extra = dict(kwargs.get("extra_body") or {})
+        extra.setdefault("priority", int(prio))
+        kwargs["extra_body"] = extra
     return kwargs
 
 
