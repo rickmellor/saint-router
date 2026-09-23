@@ -43,6 +43,8 @@ api_key      = "local"
 aliases      = ["coder"]
 timeout_s    = 180
 johnny_role  = "coder"
+# spill = ["worker"]   # other ROLES whose seat may serve when this seat is saturated (>= spill_at in flight) or not ready
+# spill_at = 6
 on_error     = "local-chat"                   # dispatch-failure fallback: one hop, never chained
 # while_loading = "cloud-small"               # per-backend warm-up target (else [routing].while_loading)
 # Use johnny_seat = "<seat>" instead of johnny_role to bind a specific seat by name.

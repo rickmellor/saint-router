@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass, replace
 
 from saint.config import BackendConfig, Config
-from saint.johnny import JohnnyResolver
+from saint.johnny import JohnnyResolver, seat_load
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,28 @@ class Effective:
     backend: BackendConfig          # the backend config call_backend should use
     state_at_dispatch: str | None   # johnny_ready | static_baseline | while_loading | fallback | None
     johnny_seat: str | None
+    spilled_from: str | None = None  # the role whose own seat was saturated/not ready when another role's seat served
+    seat_load: int | None = None     # requests in flight on the serving seat at dispatch (None = unknown)
+
+
+def _spill(cfg: Config, b: BackendConfig, resolver: JohnnyResolver, own_seat: str | None, own_load: int | None):
+    """The least-loaded READY seat among b.spill's roles, excluding the backend's own seat.
+    Returns (Resolution, load) or None. Unknown loads sort last so a readable seat wins."""
+    best = None
+    for role in b.spill:
+        r = resolver.resolve(role)
+        if r is None or r.state != "ready" or not r.endpoint or not r.model or r.seat == own_seat:
+            continue
+        load = seat_load(r.endpoint)
+        key = (load if load is not None else 10**6, b.spill.index(role))
+        if best is None or key < best[0]:
+            best = (key, r, load)
+    if best is None:
+        return None
+    _, r, load = best
+    if own_load is not None and load is not None and load >= own_load:
+        return None                     # nowhere better to go
+    return r, load
 
 
 def _fallback(cfg: Config, b: BackendConfig, seat: str | None) -> Effective:
@@ -54,12 +76,28 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
     if res.state == "ready" and res.endpoint and res.model:
         # Override the static endpoint/model with johnny's live values. johnny seats are
         # OpenAI-compatible, so default the provider to openai for johnny_only backends.
+        load = seat_load(res.endpoint) if b.spill else None
+        if b.spill and load is not None and load >= b.spill_at:
+            alt = _spill(cfg, b, resolver, res.seat, load)
+            if alt is not None:
+                r2, load2 = alt
+                print(f"[saint] spill {target}→{r2.seat} (load {load}→{load2})", file=sys.stderr)
+                eff = replace(b, base_url=r2.endpoint, model=r2.model, provider=b.provider or "openai")
+                return Effective(eff, "johnny_ready", r2.seat, spilled_from=target, seat_load=load2)
         eff = replace(b, base_url=res.endpoint, model=res.model, provider=b.provider or "openai")
-        return Effective(eff, "johnny_ready", res.seat)
+        return Effective(eff, "johnny_ready", res.seat, seat_load=load)
 
-    # loading / absent / failed: never block on a load; trigger one (if allowed) and serve via fallback.
+    # loading / absent / failed: never block on a load; trigger one (if allowed) and serve via fallback —
+    # but a ready spill seat beats the fallback (usually cloud).
     if res.state in ("loading", "absent") and cfg.johnny.ensure_load:
         resolver.ensure_load(target)
+    if b.spill:
+        alt = _spill(cfg, b, resolver, res.seat, None)
+        if alt is not None:
+            r2, load2 = alt
+            print(f"[saint] spill {target}({res.state})→{r2.seat} (load {load2})", file=sys.stderr)
+            eff = replace(b, base_url=r2.endpoint, model=r2.model, provider=b.provider or "openai")
+            return Effective(eff, "johnny_ready", r2.seat, spilled_from=target, seat_load=load2)
     return _fallback(cfg, b, res.seat)
 
 

@@ -29,7 +29,7 @@ live seat via the `johnny` CLI (results cached ~5 s); the static
 `base_url`/`model` in config is the fallback when johnny is absent or the seat
 is down. Under johnny profile `coder`, role `coder` maps to the chat seat
 (Ornith) via role_aliases — no seat literally holds the coder role, and that's
-correct. `while_loading` routes to cloud while a seat warms up.
+correct. `while_loading` routes to cloud while a seat warms up. `spill = [roles]` lets a saturated/not-ready role borrow another role's seat (least-loaded ready wins; `chat` is never listed, so never borrowed); spills are logged per request and summarised by `saint spills`.
 
 ## Classifier
 

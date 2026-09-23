@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -37,13 +37,16 @@ class LogRow:
     state_at_dispatch: str | None = None  # johnny_ready|static_baseline|while_loading|fallback|None
     cache_read_tokens: int | None = None   # provider prompt-cache reads (see migration 0003)
     cache_write_tokens: int | None = None  # provider prompt-cache writes
+    spilled_from: str | None = None        # role whose seat was saturated/not ready (migration 0004)
+    spilled_to: str | None = None          # seat that served instead
+    seat_load: int | None = None           # requests in flight on the serving seat at dispatch
 
 
 def build_log_row(decision, *, model_field, backend_latency_ms, success, error_kind,
                   tokens_in, tokens_out, prompt_storage_mode,
                   johnny_seat=None, state_at_dispatch=None,
                   cache_read_tokens=None, cache_write_tokens=None,
-                  backend_override=None) -> LogRow:
+                  backend_override=None, spilled_from=None, seat_load=None) -> LogRow:
     """Map a RoutingDecision (+ dispatch outcome) to a LogRow. Dispatch-less callers
     (e.g. `saint explain`) pass backend_latency_ms/tokens as None. `backend_override`
     is the backend that actually served when a dispatch-failure fallback hop was taken."""
@@ -74,6 +77,9 @@ def build_log_row(decision, *, model_field, backend_latency_ms, success, error_k
         state_at_dispatch=state_at_dispatch,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        spilled_from=spilled_from,
+        spilled_to=johnny_seat if spilled_from else None,
+        seat_load=seat_load,
     )
 
 
@@ -107,6 +113,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if current < 3:
         conn.executescript(_load_migration("0003_cache_metrics.sql"))
         conn.execute("PRAGMA user_version = 3")
+    if current < 4:
+        conn.executescript(_load_migration("0004_spill.sql"))
+        conn.execute("PRAGMA user_version = 4")
 
 
 def _apply_storage_mode(content: str | None, mode: str) -> str | None:
@@ -130,14 +139,16 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             classifier_input_truncated_from, classifier_latency_ms, classifier_domain,
             classifier_complexity, classifier_reason, backend_chosen, backend_latency_ms,
             tokens_in, tokens_out, success, error_kind, prompt_content, prompt_storage_mode,
-            johnny_seat, state_at_dispatch, cache_read_tokens, cache_write_tokens
+            johnny_seat, state_at_dispatch, cache_read_tokens, cache_write_tokens,
+            spilled_from, spilled_to, seat_load
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?,
+            ?, ?, ?
         )
         """,
         (
@@ -151,9 +162,28 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             stored, row.prompt_storage_mode,
             row.johnny_seat, row.state_at_dispatch,
             row.cache_read_tokens, row.cache_write_tokens,
+            row.spilled_from, row.spilled_to, row.seat_load,
         ),
     )
     return int(cursor.lastrowid or 0)
+
+
+def spill_stats(conn: sqlite3.Connection, since_iso: str | None = None) -> list[dict]:
+    """Per johnny role: how often its requests spilled and where to. Rows for johnny-served requests only."""
+    where = "WHERE johnny_seat IS NOT NULL" + (" AND ts >= ?" if since_iso else "")
+    args = (since_iso,) if since_iso else ()
+    out = []
+    for backend, total, spilled, avg_load, max_load in conn.execute(
+        f"SELECT backend_chosen, COUNT(*), SUM(CASE WHEN spilled_from IS NOT NULL THEN 1 ELSE 0 END), "
+        f"AVG(seat_load), MAX(seat_load) FROM requests {where} GROUP BY backend_chosen ORDER BY 2 DESC", args):
+        targets = conn.execute(
+            f"SELECT spilled_to, COUNT(*) FROM requests {where} AND backend_chosen = ? AND spilled_from IS NOT NULL GROUP BY spilled_to ORDER BY 2 DESC",
+            (*args, backend)).fetchall()
+        out.append({"backend": backend, "requests": total, "spilled": spilled or 0,
+                    "spill_pct": round(100.0 * (spilled or 0) / total, 1) if total else 0.0,
+                    "avg_seat_load": round(avg_load, 2) if avg_load is not None else None, "max_seat_load": max_load,
+                    "spilled_to": {t: n for t, n in targets}})
+    return out
 
 
 def fetch_training_rows(

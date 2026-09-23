@@ -125,6 +125,39 @@ def build_resolver(johnny: JohnnyConfig | None) -> JohnnyResolver | None:
     return CliResolver(johnny.cli_path, ttl=johnny.resolve_cache_ttl_s)
 
 
+# --- seat load (for spill decisions) ---
+_LOAD_TTL_S = 1.0
+_load_cache: dict[str, tuple[float, int | None]] = {}
+
+
+def seat_load(endpoint: str | None, timeout: float = 0.5) -> int | None:
+    """Requests in flight on a vLLM seat = num_requests_running + num_requests_waiting, read from its
+    Prometheus /metrics (endpoint is the OpenAI base url, e.g. http://127.0.0.1:8006/v1). Cached ~1 s.
+    None when unreadable (not vLLM, seat down) — callers must treat None as "unknown", never as idle."""
+    if not endpoint:
+        return None
+    base = endpoint.rstrip("/")
+    base = base[:-3] if base.endswith("/v1") else base
+    hit = _load_cache.get(base)
+    if hit and (time.monotonic() - hit[0]) <= _LOAD_TTL_S:
+        return hit[1]
+    load: int | None = None
+    try:
+        with urllib.request.urlopen(base + "/metrics", timeout=timeout) as r:  # noqa: S310
+            running = waiting = None
+            for line in r.read().decode("utf-8", "replace").splitlines():
+                if line.startswith("vllm:num_requests_running{") and running is None:
+                    running = float(line.rsplit(" ", 1)[-1])
+                elif line.startswith("vllm:num_requests_waiting{") and waiting is None:
+                    waiting = float(line.rsplit(" ", 1)[-1])
+            if running is not None:
+                load = int(running + (waiting or 0))
+    except Exception:
+        load = None
+    _load_cache[base] = (time.monotonic(), load)
+    return load
+
+
 # --- telemetry provide: SAINT provides, johnny accepts (append-only spool) ---
 def _ingest_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")

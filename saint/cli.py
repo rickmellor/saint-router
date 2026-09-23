@@ -265,6 +265,39 @@ def savings(
 
 
 
+@app.command("spills")
+def spills(
+    period: str = typer.Option("day", "--period", "-p", help="hour | day | week | month | all"),
+    config: Path | None = typer.Option(None),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+):
+    """How much seat balancing the router is doing: per johnny role, requests served by its own seat vs
+    spilled to another role's seat (saturated or not ready), where they went, and seat load at dispatch."""
+    from datetime import UTC, datetime, timedelta
+
+    from saint.storage import open_db, spill_stats
+
+    cfg = _load_or_die(config)
+    spans = {"hour": 1, "day": 24, "week": 24 * 7, "month": 24 * 30, "all": None}
+    if period not in spans:
+        _emit_err(f"unknown period {period!r}; choose from {', '.join(spans)}")
+        raise typer.Exit(2)
+    since = (datetime.now(UTC) - timedelta(hours=spans[period])).isoformat() if spans[period] else None
+    rows = spill_stats(open_db(Path(cfg.logging.db_path)), since)
+    if as_json:
+        import json as _json
+        print(_json.dumps({"period": period, "rows": rows}, indent=2))
+        return
+    if not rows:
+        print(f"no johnny-served requests in the last {period}")
+        return
+    print(f"{'backend':16s} {'requests':>8s} {'spilled':>8s} {'%':>6s} {'avg load':>9s} {'max':>4s}  spilled to")
+    for r in rows:
+        to = ", ".join(f"{k} ×{v}" for k, v in r["spilled_to"].items()) or "-"
+        print(f"{r['backend']:16s} {r['requests']:8d} {r['spilled']:8d} {r['spill_pct']:6.1f} "
+              f"{(r['avg_seat_load'] if r['avg_seat_load'] is not None else '-')!s:>9s} {(r['max_seat_load'] if r['max_seat_load'] is not None else '-')!s:>4s}  {to}")
+
+
 @log_app.command("show")
 def log_show(
     limit: int = typer.Option(20, "--limit", "-n"),

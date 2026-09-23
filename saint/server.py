@@ -263,6 +263,10 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
         h["x-saint-decided"] = decision.backend  # dispatch fallback changed the server
     if eff is not None and eff.state_at_dispatch:
         h["x-saint-state"] = eff.state_at_dispatch
+    if eff is not None and getattr(eff, "spilled_from", None):
+        h["x-saint-spill"] = f"{eff.spilled_from}->{eff.johnny_seat}"
+    if eff is not None and getattr(eff, "seat_load", None) is not None:
+        h["x-saint-seat-load"] = str(eff.seat_load)
     return {k: _header_safe(v) for k, v in h.items()}
 
 
@@ -626,6 +630,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         cache_read_tokens=cache_read_total or None,
                         cache_write_tokens=cache_write_total or None,
                         backend_override=served_final,
+                        spilled_from=getattr(eff_final, "spilled_from", None), seat_load=getattr(eff_final, "seat_load", None),
                     ))
                     _provide(eff_final, elapsed_ms, ttft_ms, tokens_in_total or None,
                              tokens_out_total or None, success_local)
@@ -674,6 +679,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             state_at_dispatch=_log_state(eff, served) if served else None,
             cache_read_tokens=cache_read, cache_write_tokens=cache_write,
             backend_override=served,
+            spilled_from=getattr(eff, "spilled_from", None), seat_load=getattr(eff, "seat_load", None),
         ))
         # non-streaming: TTFT not separable -> total latency only
         if eff is not None:
@@ -809,6 +815,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 cache_read_tokens=usage.get("cache_read_input_tokens"),
                 cache_write_tokens=usage.get("cache_creation_input_tokens"),
                 backend_override=backend_override,
+                spilled_from=getattr(eff, "spilled_from", None), seat_load=getattr(eff, "seat_load", None),
             ))
 
         started = time.monotonic()

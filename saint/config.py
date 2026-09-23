@@ -33,6 +33,12 @@ class BackendConfig:
     johnny_only: bool = False           # no usable static baseline (may omit base_url/model)
     while_loading: str | None = None    # per-backend override of the warm-up target
     on_error: str | None = None         # dispatch-failure fallback backend (one hop, never chained)
+    # --- spill (johnny_role backends only): other johnny ROLES whose seat may serve this backend's
+    # requests when its own seat is saturated (>= spill_at requests running+waiting) or not ready.
+    # Ordered; the least-loaded ready candidate wins. A role never listed anywhere (e.g. chat) is
+    # never borrowed. Every spill is logged (spilled_from/spilled_to) — `saint spills`.
+    spill: tuple[str, ...] = ()
+    spill_at: int = 6
     # --- provider = "bedrock" only (validated) ---
     aws_region: str | None = None       # REQUIRED for bedrock backends
     aws_profile: str | None = None      # AWS profile (credential_process/SSO); omit = default chain
@@ -409,6 +415,8 @@ def load_config(path: Path) -> Config:
             johnny_only=bool(b.get("johnny_only", False)),
             while_loading=b.get("while_loading"),
             on_error=b.get("on_error"),
+            spill=tuple(b.get("spill", ())),
+            spill_at=int(b.get("spill_at", 6)),
             aws_region=b.get("aws_region"),
             aws_profile=b.get("aws_profile"),
             drop_params=tuple(b.get("drop_params", ())),
