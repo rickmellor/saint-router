@@ -19,6 +19,9 @@ def test_litellm_private_api_still_exists():
 
 
 def test_session_constructed_once_and_provider_removed():
+    # patch() must import these to replace them; needs the [bedrock] extra.
+    pytest.importorskip("boto3")
+    pytest.importorskip("botocore.session")
     fake_provider = MagicMock()
     fake_bc_session = MagicMock()
     fake_bc_session.get_component.return_value = fake_provider

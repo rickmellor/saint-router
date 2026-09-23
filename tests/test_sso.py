@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from saint.sso import ensure_sso_valid, is_auth_failure, spawn_sso_login
 
 
@@ -75,6 +77,7 @@ def test_auth_cause_chain_and_cycles():
 
 
 def test_botocore_credential_retrieval_error():
+    pytest.importorskip("botocore")  # needs the [bedrock] extra
     from botocore.exceptions import CredentialRetrievalError
     exc = CredentialRetrievalError(provider="custom-process", error_msg="keyring locked")
     wrapper = RuntimeError("litellm wrapper")
