@@ -357,7 +357,7 @@ _ANTHROPIC_LADDER = (
     # name,            model,               aliases,             price_in, price_out, context
     ("cloud-small",    "claude-haiku-4-5",  ("haiku",),           1.0,  5.0,   200_000),
     ("cloud-medium",   "claude-sonnet-5",   ("sonnet",),          3.0,  15.0,  1_000_000),
-    ("cloud-large",    "claude-opus-5",     ("opus", "claude"),   5.0,  25.0,  1_000_000),
+    ("cloud-large",    "claude-opus-5-5",   ("opus", "claude"),   5.0,  25.0,  1_000_000),   # Opus 5.5 since 2026-09-22 (prices: Opus 5 until confirmed)
     ("cloud-flagship", "claude-fable-5",    ("fable",),           10.0, 50.0,  1_000_000),
 )
 
