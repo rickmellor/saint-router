@@ -48,6 +48,17 @@ def dispatch_candidates(cfg: Config, primary: str, breaker: Breaker) -> list[str
     return candidates
 
 
+BILLING_MARKERS = ("credit balance", "billing", "payment required", "insufficient credit", "insufficient fund",
+                   "purchase credits", "invalid x-api-key", "authentication_error", "invalid_api_key")
+
+
+def is_billing_failure(detail: str, status=None) -> bool:
+    """A provider refusal that means 'pay or fix credentials' (Anthropic 400 billing, 401/402/403 auth) — never a
+    backend health problem, so the router should say so instead of 502."""
+    d = (detail or "").lower()
+    return status in (401, 402) or any(m in d for m in BILLING_MARKERS)
+
+
 async def run_candidates(
     *,
     cfg: Config,
@@ -114,6 +125,11 @@ async def run_candidates(
                     break  # same-backend retry is pointless until creds refresh
                 detail = " ".join(str(e).split())[:300]   # the class name alone hid a day of 400s
                 status = getattr(e, "status_code", None)
+                if is_billing_failure(detail, status):
+                    # provider says pay/authenticate: no candidate, retry or breaker will help — surface it as
+                    # BillingError:<text> so the endpoint answers 402 instead of a generic 502 (2026-09-23:
+                    # "credit balance too low" hid behind 502 for an hour and failed a build job)
+                    error_kind = "BillingError: " + detail[:200]
                 if status in (400, 422) or "BadRequest" in error_kind or "invalid_request_error" in detail:
                     # the REQUEST was malformed for this backend (shape/param), not the backend
                     # unhealthy — counting it opened the breaker and blackholed a live seat for

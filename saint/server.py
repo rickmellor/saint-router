@@ -23,6 +23,23 @@ from saint.dispatch import BedrockRuntime, dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
 from saint.storage import LogRow, build_log_row, log_request, open_db
 
+
+
+def _is_billing(error_kind) -> bool:
+    return bool(error_kind) and str(error_kind).startswith("BillingError")
+
+
+def _billing_response(error_kind, anthropic: bool = False):
+    """402 + a body the clients actually render (OpenAI or Anthropic error shape) + x-saint-error: billing.
+    Callers (pi jobs, input) can then PAUSE instead of retrying/failing: no backend is unhealthy, the account is."""
+    msg = str(error_kind).split(":", 1)[1].strip() if ":" in str(error_kind) else str(error_kind)
+    headers = {"x-saint-error": "billing"}
+    if anthropic:
+        body = {"type": "error", "error": {"type": "billing_error", "message": msg}}
+    else:
+        body = {"error": {"message": f"SAINT: cloud provider billing/auth error - {msg}", "type": "billing_error", "code": "insufficient_credits"}}
+    return JSONResponse(status_code=402, content=body, headers=headers)
+
 # Chat-completion kwargs we forward to the destination backend, beyond
 # `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
 # Anything not in this list is silently dropped. Add to v1.x as needed.
@@ -589,6 +606,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     tokens_in=None, tokens_out=None,
                     prompt_storage_mode=cfg.logging.prompt_storage,
                 ))
+                if _is_billing(error_kind): return _billing_response(error_kind)
                 raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
 
             upstream, first_chunk = result.value
@@ -707,6 +725,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                       cache_read=cache_read, cache_write=cache_write, served=served)
 
         if not success:
+            if _is_billing(error_kind): return _billing_response(error_kind)
             raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
         payload = response if isinstance(response, dict) else response.model_dump()
         return JSONResponse(content=payload,
@@ -864,6 +883,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                   latency_ms=int((time.monotonic() - started) * 1000),
                                   success=False, error_kind=error_kind, usage={},
                                   backend_override=None)
+                if _is_billing(error_kind): return _billing_response(error_kind, anthropic=True)
                 return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
             upstream, first_chunk = result.value
@@ -936,6 +956,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             _log_messages_row(served=None, eff=last_eff, latency_ms=latency_ms,
                               success=False, error_kind=error_kind, usage={},
                               backend_override=None)
+            if _is_billing(error_kind): return _billing_response(error_kind, anthropic=True)
             return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
         usage = anthropic_usage(result.value)
@@ -1019,6 +1040,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             johnny_seat=eff.johnny_seat, state_at_dispatch=eff.state_at_dispatch,
         ))
         if not success:
+            if _is_billing(error_kind): return _billing_response(error_kind)
             raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
         payload = response if isinstance(response, dict) else response.model_dump()
         return JSONResponse(content=payload, headers={
