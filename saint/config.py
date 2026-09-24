@@ -54,6 +54,10 @@ class BackendConfig:
     price_cache_read: float | None = None
     price_cache_write: float | None = None
     context: int | None = None          # max context window (tokens); surfaced in /status
+    # --- energy (local seats; /status and `saint savings`) ---
+    gpus: int | None = None             # GPUs this seat occupies (else [energy] seat_gpus)
+    watts: float | None = None          # measured draw at load, W (overrides gpus x gpu_watts + host share)
+    tok_s: float | None = None          # benchmarked aggregate decode tok/s (johnny bench); overrides the log-measured p75
 
     @property
     def johnny_bound(self) -> bool:
@@ -160,6 +164,9 @@ class EnergyConfig:
     price_kwh: float = 0.36       # USD per kWh
     host_watts: float = 1500.0    # whole vLLM host at full load (incl. all GPUs)
     gpu_watts: float = 300.0      # per-GPU at full load
+    seat_gpus: int = 2            # GPUs per local seat when a backend does not set `gpus`
+    total_gpus: int | None = None # GPUs in the host (else the sum over local backends); shares the non-GPU base
+    baseline: str | None = None   # cloud backend for the savings counterfactual (else: the policy's hard tier, else the priciest cloud)
 
 
 @dataclass(frozen=True)
@@ -432,6 +439,9 @@ def load_config(path: Path) -> Config:
             price_cache_write=(float(b["price_cache_write"])
                                if b.get("price_cache_write") is not None else None),
             context=int(b["context"]) if b.get("context") is not None else None,
+            gpus=int(b["gpus"]) if b.get("gpus") is not None else None,
+            watts=float(b["watts"]) if b.get("watts") is not None else None,
+            tok_s=float(b["tok_s"]) if b.get("tok_s") is not None else None,
         )
 
     # Auto-configure provider ladders from key presence (explicit [backends] already win).
@@ -525,6 +535,9 @@ def load_config(path: Path) -> Config:
         price_kwh=float(en_raw.get("price_kwh", 0.36)),
         host_watts=float(en_raw.get("host_watts", 1500.0)),
         gpu_watts=float(en_raw.get("gpu_watts", 300.0)),
+        seat_gpus=int(en_raw.get("seat_gpus", 2)),
+        total_gpus=(int(en_raw["total_gpus"]) if en_raw.get("total_gpus") is not None else None),
+        baseline=en_raw.get("baseline"),
     )
 
     cfg = Config(

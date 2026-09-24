@@ -69,6 +69,10 @@ class Row:
     actual_cost: float            # $ actually spent: cache-aware Anthropic bill (cloud) or power (local)
     cloud_equiv: float | None     # what the baseline cloud backend would have charged (uncached)
     no_cache_cost: float | None = None   # cloud list-price ignoring cache (for the caching breakdown)
+    watts: float | None = None           # local: seat draw the energy price is based on
+    tok_per_w: float | None = None       # local: tok_s / watts
+    source: str | None = None            # local: "bench" (config tok_s from johnny bench) | "log" (request-log p75)
+    priced_as: str | None = None         # logged name resolved to another backend (rename / alias)
 
 
 def _eff_cache_prices(b):
@@ -80,12 +84,77 @@ def _eff_cache_prices(b):
     return cr, cw
 
 
+def is_cloud(b) -> bool:
+    """A priced, non-local backend — the only kind that can be a savings counterfactual."""
+    return bool(b is not None and b.price_in is not None and not b.johnny_bound and not b.name.startswith("local"))
+
+
+def pick_baseline(cfg, explicit: str | None = None) -> tuple[str, str]:
+    """The counterfactual cloud backend and how it was chosen. A local `default_on_failure`
+    (the case since the CPU fallback seat was retired) must never be the baseline: it has no
+    cloud price, so every dollar actually spent would show as OVERSPEND. Order: --baseline flag,
+    [energy] baseline, default_on_failure if it is cloud, the routing policy's hard tier, the
+    priciest cloud backend. Raises ValueError for an undefined name."""
+    if explicit:
+        name, how = explicit, "flag"
+    elif cfg.energy.baseline:
+        name, how = cfg.energy.baseline, "config"
+    else:
+        d = cfg.routing.default_on_failure
+        if is_cloud(cfg.backends.get(d)):
+            name, how = d, "default_on_failure"
+        else:
+            urg = getattr(cfg.routing.default_urgency, "value", cfg.routing.default_urgency)
+            pol = cfg.routing.policy.get(urg) or next(iter(cfg.routing.policy.values()), {})
+            hard = [pol.get(k) for k in ("code,hard", "general,hard")]
+            hard = [h for h in hard if is_cloud(cfg.backends.get(h))]
+            if hard:
+                name, how = hard[0], "policy hard tier"
+            else:
+                clouds = sorted((b for b in cfg.backends.values() if is_cloud(b)), key=lambda b: -(b.price_in or 0))
+                if clouds:
+                    name, how = clouds[0].name, "priciest cloud"
+                else:
+                    name, how = d, "default_on_failure (unpriced)"
+    if name not in cfg.backends:
+        raise ValueError(f"baseline backend {name!r} is not defined")
+    return name, how
+
+
+def resolve_backend(cfg, logged: str):
+    """(backend, priced_as): the config backend for a logged backend_chosen. Names that were
+    renamed (cloud-flagship -> cloud-exquisite, 2026-09-23) resolve through aliases, so old rows
+    keep a price instead of silently costing $0."""
+    b = cfg.backends.get(logged)
+    if b is not None:
+        return b, None
+    tail = logged.split("-", 1)[1] if "-" in logged else logged
+    for bb in cfg.backends.values():
+        if logged in bb.aliases or tail in bb.aliases:
+            return bb, bb.name
+    return None, None
+
+
+def local_seat_watts(cfg, b) -> float:
+    """Watts attributed to one local seat: its measured `watts` if configured, else its GPUs at
+    full load plus a per-GPU share of the host's non-GPU base — the same formula /status uses.
+    Charging every request the whole host (the old behaviour) inflated local $/Mtok 2-3x."""
+    en = cfg.energy
+    if b is not None and b.watts:
+        return float(b.watts)
+    n = (b.gpus if (b is not None and b.gpus) else en.seat_gpus)
+    locals_ = [x for x in cfg.backends.values() if x.johnny_bound or x.name.startswith("local")]
+    total = en.total_gpus or sum((x.gpus or en.seat_gpus) for x in locals_) or n
+    host_base = max(0.0, en.host_watts - total * en.gpu_watts)
+    return n * en.gpu_watts + host_base * n / total
+
+
 def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict:
     """Build the savings report for a period. Reuses storage.usage_stats for aggregation."""
     from saint.storage import usage_stats
 
     since = since_for(period)
-    baseline = baseline or cfg.routing.default_on_failure
+    baseline, baseline_how = pick_baseline(cfg, baseline)
     bb = cfg.backends.get(baseline)
     base_in = (bb.price_in or 0.0) if bb else 0.0
     base_out = (bb.price_out or 0.0) if bb else 0.0
@@ -93,21 +162,27 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
     en = cfg.energy
     rates = local_decode_rates(conn)
     rows: list[Row] = []
+    notes: list[str] = []
 
     for r in usage_stats(conn, since):
         if r["kind"] == "embed":
             continue                                  # not part of the chat cost counterfactual
         name = r["backend_chosen"]
-        b = cfg.backends.get(name)
+        b, priced_as = resolve_backend(cfg, name)
+        if priced_as:
+            notes.append(f"{name} priced as {priced_as} (renamed / alias)")
         tin, tout = r["tokens_in"], r["tokens_out"]
         is_local = bool(b and b.johnny_bound) or name.startswith("local")
 
         if is_local:
-            tok_s = rates.get(name)
-            elec = (en.host_watts * en.price_kwh / (tok_s * 3.6)) if tok_s else None
+            tok_s, src = ((b.tok_s, "bench") if (b is not None and b.tok_s) else (rates.get(name), "log"))
+            watts = local_seat_watts(cfg, b)
+            elec = (watts * en.price_kwh / (tok_s * 3.6)) if tok_s else None
             actual = (tout / 1e6 * elec) if elec is not None else 0.0
             rows.append(Row(name, "local", r["requests"], tin, tout, tok_s, elec,
-                            actual, (tin * base_in + tout * base_out) / 1e6 if bb else None))
+                            actual, (tin * base_in + tout * base_out) / 1e6 if bb else None,
+                            watts=watts, tok_per_w=(tok_s / watts if (tok_s and watts) else None),
+                            source=(src if tok_s else None), priced_as=priced_as))
         elif b and b.price_in is not None:
             po = b.price_out or 0.0
             crd, cwr = r["cache_read"], r["cache_write"]
@@ -116,7 +191,8 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
             real = (uncached_in * b.price_in + crd * cr_p + cwr * cw_p + tout * po) / 1e6  # Anthropic bill
             no_cache = (tin * b.price_in + tout * po) / 1e6                                # list, no caching
             rows.append(Row(name, "cloud", r["requests"], tin, tout, None, None,
-                            real, (tin * base_in + tout * base_out) / 1e6 if bb else None, no_cache))
+                            real, (tin * base_in + tout * base_out) / 1e6 if bb else None, no_cache,
+                            priced_as=priced_as))
         else:
             rows.append(Row(name, "other", r["requests"], tin, tout, None, None, 0.0, None))
 
@@ -141,6 +217,9 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
         "period": period,
         "since": since,
         "baseline": baseline,
+        "baseline_how": baseline_how,
+        "notes": notes,
+        "energy": {"price_kwh": en.price_kwh, "gpu_watts": en.gpu_watts, "host_watts": en.host_watts},
         "rows": rows,
         "cloud_cost": cloud_cost,
         "local_cost": local_cost,
@@ -225,7 +304,7 @@ def render(rep: dict, color: bool = True) -> str:
                f"{' ' * (W - 2 - pad - len(title))}{c('gold')}{c('bold')}║{R}")
     out.append(f"  {c('gold')}{c('bold')}╚{'═' * (W - 2)}╝{R}")
     out.append(f"  {c('dim')}⚡ {label} · {rep['requests']:,} requests · "
-               f"baseline {rep['baseline']}{R}")
+               f"baseline {rep['baseline']} ({rep.get('baseline_how', '')}){R}")
     out.append("")
 
     peak = max(rep["total_if_all_cloud"], 1e-9)
@@ -265,6 +344,17 @@ def render(rep: dict, color: bool = True) -> str:
         pad = " " * max(0, 22 - len(name) - (1 if x.kind == "local" else 0))
         out.append(f"  {kc}{name}{pad}{R}{x.requests:>6}{x.tokens_out:>11,}"
                    f"{c('dim')}{rate:>9}{R}{kc}{_money(x.actual_cost):>10}{R}")
+    loc = [x for x in rep["rows"] if x.kind == "local" and x.tok_s]
+    if loc:
+        en = rep.get("energy") or {}
+        out.append("")
+        out.append(f"  {c('dim')}energy ${en.get('price_kwh', 0):.2f}/kWh · {en.get('gpu_watts', 0):.0f} W per GPU at load · "
+                   f"tok/s [bench] = config tok_s from johnny bench, [log] = request-log p75{R}")
+        for x in sorted(loc, key=lambda r: -(r.tok_per_w or 0)):
+            out.append(f"  {c('dim')}{x.backend:<22}{x.watts:>6.0f} W{x.tok_s:>8.1f} tok/s [{x.source}]"
+                       f"{(x.tok_per_w or 0):>8.3f} tok/W{(x.elec_per_mtok or 0):>8.2f} $/Mtok{R}")
+    for n in rep.get("notes") or []:
+        out.append(f"  {c('dim')}note: {n}{R}")
     out.append("")
     # Flush-left, so a client that .strip()s the response can't misalign line 1
     # (the margin lived only as a leading 2 spaces per line; relative indent is kept).

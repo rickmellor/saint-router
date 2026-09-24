@@ -221,15 +221,21 @@ all-cloud-large counterfactual (uncached): $9.80
 NET SAVINGS $8.38  =  local routing $6.24 + cheaper tiers $0.02 + prompt caching $2.11
 ```
 
-Local seats are priced too. The `[energy]` block (`price_kwh`, `host_watts`, `gpu_watts` —
-all tunable, nothing hardcoded) turns a seat's measured decode rate into $/Mtok of electricity,
-so a local seat and a cloud tier can be compared in one unit. The rate is measured from SAINT's
-own request log — the p75 of per-response decode rate over substantial responses, which avoids
-short replies where fixed TTFT drags the average down.
+Local seats are priced too. The `[energy]` block (`price_kwh`, `host_watts`, `gpu_watts`,
+`seat_gpus`, `total_gpus` — all tunable, nothing hardcoded) turns a seat's decode rate into
+$/Mtok of electricity, so a local seat and a cloud tier can be compared in one unit. Each seat
+is charged ITS watts — its GPUs at full load plus a per-GPU share of the host's non-GPU base —
+never the whole host. Per backend you can pin what johnny measured: `gpus` (GPUs the seat
+occupies), `watts` (draw at load) and `tok_s` (aggregate decode throughput from `johnny bench`);
+without `tok_s` the rate falls back to the p75 of per-response decode rate in SAINT's own request
+log over substantial responses (which includes queueing and prefill, so it runs low). `saint
+savings` prints each seat's watts, tok/s and its source, tok/W and $/Mtok.
 
 Give priced backends `price_in` / `price_out` (USD per Mtok; anthropic cache prices
 derive as 0.1× / 1.25× of `price_in`). The counterfactual sends all chat traffic to
-`--baseline` (default `default_on_failure`) uncached; the three savings components
+`--baseline` (default: `[energy] baseline`, else `default_on_failure` when it is a cloud tier,
+else the routing policy's hard tier, else the priciest cloud backend — never a local seat, which
+has no cloud price and would report every dollar as OVERSPEND) uncached; the three savings components
 provably sum to the net. `--json` for monitoring jobs. Cache advantage can be negative
 — write-heavy days are reported honestly.
 

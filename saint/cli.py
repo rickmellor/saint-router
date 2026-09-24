@@ -239,7 +239,7 @@ def savings(
     period: str = typer.Option("day", "--period", "-p",
         help="hour | day | week | month | year | all"),
     baseline: str | None = typer.Option(None, "--baseline",
-        help="Cloud backend for the counterfactual (default: routing.default_on_failure)."),
+        help="Cloud backend for the counterfactual (default: [energy] baseline, else the routing policy's hard tier, else the priciest cloud backend — never a local seat)."),
     config: Path | None = typer.Option(None),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colour."),
@@ -413,7 +413,7 @@ def log_stats(
     days: float = typer.Option(7.0, "--days", "-d", help="Window in days."),
     baseline: str | None = typer.Option(
         None, "--baseline",
-        help="Counterfactual backend for net savings (default: routing.default_on_failure)."),
+        help="Counterfactual backend for net savings (default: [energy] baseline, else the routing policy's hard tier, else the priciest cloud backend — never a local seat)."),
     config: Path | None = typer.Option(None),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ):
@@ -435,7 +435,11 @@ def log_stats(
     from saint.storage import open_db, usage_stats
 
     cfg = _load_or_die(config)
-    baseline = baseline or cfg.routing.default_on_failure
+    from saint.savings import pick_baseline
+    try:
+        baseline, _how = pick_baseline(cfg, baseline)
+    except ValueError:
+        pass                                    # undefined name: reported just below
     bb = cfg.backends.get(baseline)
     if baseline and bb is None:
         _emit_err(f"baseline backend '{baseline}' is not defined")

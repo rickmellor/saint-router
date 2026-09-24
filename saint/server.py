@@ -475,8 +475,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 if ctx is None:                           # fallback: johnny native, then static
                     ctx = inv.get(model, {}).get("context") if model else b.context
                 n_gpus = len(inv.get(model, {}).get("gpus") or [])
-                tok_s = measured.get(name)                # measured throughput for this seat
-                seat_watts = n_gpus * en.gpu_watts + host_base * n_gpus / total_gpus
+                tok_s = b.tok_s or measured.get(name)     # johnny-bench figure from config, else log-measured
+                n_gpus = b.gpus or n_gpus
+                seat_watts = b.watts or (n_gpus * en.gpu_watts + host_base * n_gpus / total_gpus)
                 elec = round(seat_watts * en.price_kwh / (tok_s * 3.6), 3) if tok_s else None
                 e.update(kind="local", role=b.johnny_target, model=model, endpoint=ep,
                          state=(res.state if res else "absent"),
