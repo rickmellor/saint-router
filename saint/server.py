@@ -307,6 +307,26 @@ def _seat_maxlen(endpoint: str | None) -> int | None:
         return None
 
 
+def _seat_health(endpoint: str | None, timeout: float = 2.0) -> dict[str, Any]:
+    """Pass-through of a seat's own GET /health. vLLM (and llama.cpp) serve it at the server
+    root, not under /v1: 200 + empty body when the engine is up. Returns the seat's status
+    code and body verbatim; code None (+ error) when the seat did not answer at all."""
+    if not endpoint:
+        return {"url": None, "code": None, "body": None, "error": "no endpoint"}
+    import urllib.error as _uerr
+    import urllib.request as _url
+    base = endpoint.replace("0.0.0.0", "127.0.0.1").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    url = f"{base}/health"
+    try:
+        with _url.urlopen(url, timeout=timeout) as r:
+            return {"url": url, "code": r.status, "body": r.read().decode(errors="replace")[:2000]}
+    except _uerr.HTTPError as e:
+        return {"url": url, "code": e.code, "body": e.read().decode(errors="replace")[:2000]}
+    except Exception as e:  # connection refused / timeout / DNS
+        return {"url": url, "code": None, "body": None, "error": str(e) or type(e).__name__}
+
 
 class _MessageStartDedupe:
     """SSE relay filter: drop every `message_start` event after the first. litellm's
@@ -367,6 +387,77 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 for mid in ids
             ],
         }
+
+    @app.get("/health")
+    async def health(seat: str | None = None, strict: bool = False) -> JSONResponse:
+        """Pass-through of the local seats' own GET /health (vLLM / llama.cpp) — SAINT has no
+        engine of its own to report on. Cloud backends are not probed.
+
+        No query: probe every local backend, one probe per distinct seat (several backends
+        share a port), all in parallel. 200 when every seat SAINT currently routes to answers
+        200, else 503 with the per-seat codes so the caller sees which one. "Routes to" =
+        johnny-bound and resolved `ready`. A johnny seat that is loading/absent is reported
+        but not counted (not a routing target yet). Static pins with no johnny binding
+        (experiment seats) are reported but only counted with ?strict=1 — or always, when no
+        johnny resolver is configured and static is all there is.
+
+        ?seat=<backend name>: relay that one seat's /health status code and body verbatim."""
+        import asyncio as _aio
+        resolver = app.state.resolver
+
+        def _norm(url: str | None) -> str | None:
+            if not url:
+                return None
+            return _re.sub(r"//(0\.0\.0\.0|localhost)(?=[:/]|$)", "//127.0.0.1", url).rstrip("/")
+
+        local = {n: b for n, b in cfg.backends.items() if b.provider not in ("anthropic", "bedrock")}
+        if seat:
+            name = seat[6:] if seat.startswith("saint-") else seat
+            if name not in cfg.backends:
+                raise HTTPException(404, f"unknown backend '{seat}'")
+            if name not in local:
+                raise HTTPException(400, f"'{name}' is a cloud backend; nothing to pass through")
+            local = {name: local[name]}
+
+        # johnny resolutions, concurrently (the CLI transport is ~1 s per shell-out)
+        targets = sorted({b.johnny_target for b in local.values() if b.johnny_bound and resolver})
+        resolved = dict(zip(targets, await _aio.gather(
+            *(_aio.to_thread(resolver.resolve, t) for t in targets))))
+
+        def _endpoint(b) -> tuple[str | None, str]:
+            if b.johnny_bound and resolver:
+                res = resolved.get(b.johnny_target)
+                if res and res.endpoint:
+                    return res.endpoint, res.state
+                return b.base_url, (res.state if res else "absent")
+            return b.base_url, "static"
+
+        if seat:
+            b = next(iter(local.values()))
+            ep, state = _endpoint(b)
+            h = await _aio.to_thread(_seat_health, ep)
+            code = h["code"] if h["code"] is not None else 503
+            return JSONResponse({"backend": b.name, "state": state, **h}, status_code=code)
+
+        count_static = strict or resolver is None
+        rank = {"ready": 2, "static": 1}
+        groups: dict[str, dict[str, Any]] = {}
+        for name, b in local.items():
+            ep, state = _endpoint(b)
+            key = _norm(ep) or f"<{name}>"
+            g = groups.setdefault(key, {"endpoint": _norm(ep), "backends": [], "state": state})
+            g["backends"].append(name)
+            if rank.get(state, 0) > rank.get(g["state"], 0):   # a live-ready binding wins the group
+                g["state"] = state
+        results = await _aio.gather(*(_aio.to_thread(_seat_health, g["endpoint"]) for g in groups.values()))
+        seats, ok = [], True
+        for g, h in zip(groups.values(), results):
+            counted = g["state"] == "ready" or (g["state"] == "static" and count_static)
+            healthy = h["code"] == 200
+            ok = ok and (healthy or not counted)
+            seats.append({**g, **h, "ok": healthy, "counted": counted})
+        return JSONResponse({"status": "ok" if ok else "degraded", "seats": seats},
+                            status_code=200 if ok else 503)
 
     def _remember_decision(decision, *, served, session_id, model_field, latency_ms, usage, api,
                            eff=None, cache_read=None):

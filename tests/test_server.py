@@ -410,3 +410,123 @@ def test_embeddings_endpoint_unconfigured_404(tmp_path):
     client = TestClient(app)
     resp = client.post("/v1/embeddings", json={"input": "hello"})
     assert resp.status_code == 404
+
+
+# ---- GET /health: pass-through of the seats' own vLLM /health -------------------------------
+
+def _health_stub(table):
+    """_seat_health replacement: table maps endpoint -> (code | None, body)."""
+    def fake(endpoint, timeout=2.0):
+        code, body = table.get(endpoint, (None, None))
+        out = {"url": f"{(endpoint or '').rstrip('/')}/health", "code": code, "body": body}
+        if code is None:
+            out["error"] = "connection refused"
+        return out
+    return fake
+
+
+def test_health_all_seats_up_is_200(tmp_path):
+    cfg = _cfg()          # four local backends, all static on http://x; one cloud (not probed)
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    with patch("saint.server._seat_health", _health_stub({"http://x": (200, "")})):
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert len(body["seats"]) == 1                        # one probe per distinct endpoint
+    seat = body["seats"][0]
+    assert set(seat["backends"]) == {"local-large", "local-small", "local-coder", "cloud-small"}
+    assert seat["ok"] is True and seat["counted"] is True and seat["state"] == "static"
+    assert "cloud-large" not in seat["backends"]
+
+
+def test_health_static_seat_down_is_503(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    with patch("saint.server._seat_health", _health_stub({})):
+        resp = client.get("/health")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["seats"][0]["ok"] is False and body["seats"][0]["code"] is None
+
+
+def test_health_single_seat_relays_code_and_body(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    with patch("saint.server._seat_health", _health_stub({"http://x": (200, "")})):
+        resp = client.get("/health", params={"seat": "saint-local-coder"})
+    assert resp.status_code == 200
+    assert resp.json()["backend"] == "local-coder"
+    assert resp.json()["code"] == 200
+    with patch("saint.server._seat_health", _health_stub({"http://x": (500, "engine dead")})):
+        resp = client.get("/health", params={"seat": "local-coder"})
+    assert resp.status_code == 500
+    assert resp.json()["body"] == "engine dead"
+    with patch("saint.server._seat_health", _health_stub({})):
+        resp = client.get("/health", params={"seat": "local-coder"})
+    assert resp.status_code == 503
+
+
+def test_health_single_seat_rejects_cloud_and_unknown(tmp_path):
+    cfg = _cfg()
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    client = TestClient(app)
+    assert client.get("/health", params={"seat": "cloud-large"}).status_code == 400
+    assert client.get("/health", params={"seat": "nope"}).status_code == 404
+
+
+def test_seat_health_strips_v1_and_maps_wildcard_host():
+    from saint.server import _seat_health
+    seen = {}
+
+    class _Resp:
+        status = 200
+        def read(self): return b""
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(url, timeout):
+        seen["url"] = url
+        return _Resp()
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        out = _seat_health("http://0.0.0.0:8002/v1")
+    assert seen["url"] == "http://127.0.0.1:8002/health"
+    assert out == {"url": "http://127.0.0.1:8002/health", "code": 200, "body": ""}
+    assert _seat_health(None)["code"] is None
+
+
+def test_health_with_johnny_counts_ready_seats_and_static_only_when_strict(tmp_path):
+    """local-coder bound to johnny role `coder` → live endpoint, counted. local-large loading →
+    reported, not counted. Static pins (local-small, cloud-small on http://x) advisory unless
+    ?strict=1. localhost / 0.0.0.0 collapse onto one probe per seat."""
+    from dataclasses import replace
+    from saint.johnny import Resolution
+    cfg = _cfg()
+    cfg.backends["local-coder"] = replace(cfg.backends["local-coder"], johnny_role="coder")
+    cfg.backends["local-large"] = replace(cfg.backends["local-large"], johnny_role="large")
+
+    class FakeResolver:
+        def resolve(self, target):
+            return {"coder": Resolution(seat="s1", endpoint="http://0.0.0.0:8002/v1", model="m",
+                                        state="ready", eta_s=None, queue_depth=None),
+                    "large": Resolution(seat=None, endpoint=None, model=None,
+                                        state="loading", eta_s=30, queue_depth=None)}[target]
+
+    app = build_app(cfg, db_path=tmp_path / "log.sqlite")
+    app.state.resolver = FakeResolver()
+    client = TestClient(app)
+    table = {"http://127.0.0.1:8002/v1": (200, ""), "http://x": (None, None)}   # static seat down
+    with patch("saint.server._seat_health", _health_stub(table)):
+        resp = client.get("/health")
+        strict = client.get("/health", params={"strict": 1})
+    assert resp.status_code == 200
+    by_ep = {s["endpoint"]: s for s in resp.json()["seats"]}
+    assert by_ep["http://127.0.0.1:8002/v1"]["counted"] is True and by_ep["http://127.0.0.1:8002/v1"]["ok"] is True
+    assert by_ep["http://x"]["counted"] is False and by_ep["http://x"]["ok"] is False
+    assert by_ep["http://x"]["state"] == "loading" or by_ep["http://x"]["state"] == "static"
+    assert strict.status_code == 503 and strict.json()["status"] == "degraded"
