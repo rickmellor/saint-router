@@ -1,11 +1,13 @@
-"""saint-features: tiny local sidecar serving NVIDIA prompt-task-and-complexity-classifier probabilities.
+"""saint-features: tiny local sidecar for SAINT's embedding head.
 
 SAINT itself stays torch-free; this runs in any torch env and answers
-    POST /features       {"input": ["prompt", ...]}  ->  {"features": [[32 floats], ...], "dim": 32}
     POST /v1/embeddings  OpenAI-compatible; nomic-embed-text-v1.5 (mean-pooled, L2-normalized) — the same model the
-                         CPU `embed` seat serves, ~10-20 ms on a GPU instead of seconds
+                         CPU `embed` seat served, ~10-20 ms on a GPU instead of seconds
+    POST /features       {"input": ["prompt", ...]}  ->  {"features": [[32 floats], ...], "dim": 32}
+                         NVIDIA prompt-task-and-complexity-classifier probabilities — RETIRED 2026-09-26 (Laya replaced
+                         the feature-augmented head); only served with --features, otherwise 410 Gone
     GET  /health, /v1/models
-Usage:  python server.py [--port 8005] [--device cuda|cpu] [--model DIR]
+Usage:  python server.py [--port 8005] [--device cuda|cpu] [--features [--model DIR]]
 """
 from __future__ import annotations
 
@@ -25,14 +27,17 @@ LOCK = threading.Lock()
 def main() -> None:
     ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=8005); ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu"); ap.add_argument("--model", default=None)
-    ap.add_argument("--embed-model", default="/mnt/data/models/nomic-ai/nomic-embed-text-v1.5"); ap.add_argument("--embed-max-tokens", type=int, default=2048); a = ap.parse_args()
-    if a.model: nv.MODEL = Path(a.model)
-    _, tok, net = nv.load(a.device)
+    ap.add_argument("--embed-model", default="/mnt/data/models/nomic-ai/nomic-embed-text-v1.5"); ap.add_argument("--embed-max-tokens", type=int, default=2048)
+    ap.add_argument("--features", action="store_true", help="also load the NVIDIA prompt classifier and serve POST /features (retired 2026-09-26)"); a = ap.parse_args()
+    features = None
+    if a.features:
+        if a.model: nv.MODEL = Path(a.model)
+        _, tok, net = nv.load(a.device)
 
-    def features(texts: list[str]) -> list[list[float]]:
-        with LOCK, torch.no_grad():
-            enc = tok([t[:6000] for t in texts], return_tensors="pt", max_length=512, padding=True, truncation=True).to(a.device)
-            return np.concatenate([p.float().cpu().numpy() for p in net(enc["input_ids"], enc["attention_mask"])], 1).round(5).tolist()
+        def features(texts: list[str]) -> list[list[float]]:
+            with LOCK, torch.no_grad():
+                enc = tok([t[:6000] for t in texts], return_tensors="pt", max_length=512, padding=True, truncation=True).to(a.device)
+                return np.concatenate([p.float().cpu().numpy() for p in net(enc["input_ids"], enc["attention_mask"])], 1).round(5).tolist()
 
     from transformers import AutoModel, AutoTokenizer
     etok = AutoTokenizer.from_pretrained(a.embed_model)
@@ -47,7 +52,8 @@ def main() -> None:
                 out += torch.nn.functional.normalize(v, dim=-1).cpu().tolist(); ntok += int(enc["attention_mask"].sum())
         return out, ntok
 
-    features(["warm up"]); embed(["warm up"])
+    if features: features(["warm up"])
+    embed(["warm up"])
 
     class H(BaseHTTPRequestHandler):
         def _send(self, code: int, obj: dict) -> None:
@@ -57,7 +63,7 @@ def main() -> None:
         def do_GET(self):  # noqa: N802
             if self.path.startswith("/v1/models"):
                 return self._send(200, {"object": "list", "data": [{"id": "nomic-embed", "object": "model"}]})
-            self._send(200, {"status": "ok", "device": a.device, "dim": 32})
+            self._send(200, {"status": "ok", "device": a.device, "embed": "nomic-embed", "features": bool(features), "dim": 32 if features else 0})
 
         def do_POST(self):  # noqa: N802
             try:
@@ -66,6 +72,8 @@ def main() -> None:
                     inp = req["input"]; vecs, ntok = embed([inp] if isinstance(inp, str) else list(inp))
                     return self._send(200, {"object": "list", "model": "nomic-embed", "usage": {"prompt_tokens": ntok, "total_tokens": ntok},
                                             "data": [{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vecs)]})
+                if features is None:
+                    return self._send(410, {"error": "the NVIDIA prompt classifier is retired (2026-09-26); start with --features to serve it"})
                 f = features(list(req["input"]))
                 self._send(200, {"features": f, "dim": len(f[0])})
             except Exception as e:  # noqa: BLE001
@@ -74,7 +82,7 @@ def main() -> None:
         def log_message(self, *_):
             pass
 
-    print(f"saint-features on {a.host}:{a.port} ({a.device})", flush=True)
+    print(f"saint-features on {a.host}:{a.port} ({a.device}; embed=nomic, features={'on' if features else 'off'})", flush=True)
     ThreadingHTTPServer((a.host, a.port), H).serve_forever()
 
 

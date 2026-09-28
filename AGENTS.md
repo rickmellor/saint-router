@@ -33,13 +33,22 @@ correct. `while_loading` routes to cloud while a seat warms up. `spill = [roles]
 
 ## Classifier
 
-`mode = "embedding"`: nomic embeddings (+ optional NVIDIA/lexical features from the
-`saint-features` sidecar, `tools/prompt_features/server.py`) + trained head, ~60 ms.
-Low-confidence defers to `backend` — a LOCAL chat seat on Rick's box, no cloud in the
-classifier path. The rubric is kind-of-work: `hard` = ideation/architecture/validation/
-orchestration (cloud), everything manual is `medium` (local). Retrain with
-`saint classifier train` (reads `classifier.label_files` + logged labels newer than
-`classifier.labels_since`). Details: `docs/local-classifier.md`.
+`mode = "laya"` (since 2026-09-26): a fine-tuned Laya decision model served by
+`laya-saint.service` (:8130, `tools/laya_saint_serve.py`, Jev wire protocol) answers domain +
+complexity in one ~22 ms call; `classifier.laya_questions_path` is the EXACT question text it
+was trained with (it is model input — never edit it without retraining). Low-confidence
+(`laya_min_confidence`, 0.8) defers to `backend` — a LOCAL chat seat on Rick's box, no cloud in
+the classifier path. `mode = "embedding"` is the rollback: nomic embeddings from the
+`saint-features` sidecar (`tools/prompt_features/server.py`, embed-only since the NVIDIA
+prompt classifier was retired 2026-09-26; `--features` re-enables) + trained head, ~30 ms.
+The rubric is kind-of-work: `hard` = ideation/architecture/validation/orchestration (cloud),
+everything manual is `medium` (local). Retrain: Laya via
+`tools/classifier_eval/laya_finetune.py --variant full --questions both --no-cv --final` +
+`laya_export_checkpoint.py` (needs ~12 GB free on the 4080 → stop `gemma12.service` first,
+Rick does that), then restart `laya-saint` + `saint`; the head via `saint classifier train`
+(reads `classifier.label_files` + logged labels newer than `classifier.labels_since`).
+`saint classifier status --drift` replays whichever is live. Details: `docs/local-classifier.md`
+and infrastructure `saint/README.md` "Laya".
 
 **The repo is PUBLIC.** Logged prompts and anything derived from them (label files,
 adjudicated sets, relabel output) live in `~/.config/saint/classifier_eval/` and never get

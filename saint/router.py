@@ -68,29 +68,74 @@ async def _classify_for_route(cfg: Config, prompt: str) -> FallbackOutcome:
             )
         return outcome
 
-    if cfg.classifier.mode != "embedding":
+    text = prompt[: cfg.classifier.max_input_chars]
+    truncated_from = len(prompt) if len(prompt) > len(text) else None
+
+    async def _embedding(reason_prefix: str | None) -> FallbackOutcome:
+        """The local embedding head, deferring to the LLM labeller. `reason_prefix` records why
+        we got here when it was not the first choice (e.g. 'laya_defer')."""
+        from saint import embed_classifier as EC
+
+        def _why(r: str) -> str:
+            return f"{reason_prefix}+{r}" if reason_prefix else r
+
+        head = _load_head(cfg.classifier.head_path)
+        embed_backend = cfg.backends.get(cfg.classifier.embedding_backend or "")
+        if head is None or embed_backend is None:
+            return await _llm(_why("embedding_untrained"))
+        try:
+            result = await EC.classify(head, embed_backend, prompt=text, min_confidence=cfg.classifier.min_confidence,
+                                       feature_url=cfg.classifier.feature_url)
+        except Exception as e:
+            _log_classifier_failure(embed_backend.name, ClassifierError(str(e)))
+            return await _llm(_why("embedding_error"))
+        if result is None:  # head not confident enough — defer to the LLM
+            return await _llm(_why("embedding_defer"))
+        return FallbackOutcome(
+            result=result, classifier_used=f"{embed_backend.name} (embed-head)",
+            fallback_reason=reason_prefix, input_chars=len(text), input_truncated_from=truncated_from,
+        )
+
+    mode = cfg.classifier.mode
+    if mode == "embedding":
+        return await _embedding(None)
+    if mode not in ("jev", "laya"):
         return await _llm(None)
 
-    from saint import embed_classifier as EC
+    # mode == "laya" | "jev": a System One decision model first (local fine-tuned Laya, or the
+    # hosted Jev); unsure or unavailable → the embedding head when configured → the LLM
+    # labeller. The older classifiers stay in the chain on purpose: an outage of the fast
+    # classifier must cost latency, not routing.
+    if mode == "laya":
+        from saint import laya_classifier as LC
+        used, prefix = LC.CLASSIFIER_USED, "laya"
+        via_embedding = cfg.classifier.laya_fallthrough == "embedding" and bool(cfg.classifier.embedding_backend)
 
-    head = _load_head(cfg.classifier.head_path)
-    embed_backend = cfg.backends.get(cfg.classifier.embedding_backend or "")
-    if head is None or embed_backend is None:
-        return await _llm("embedding_untrained")
+        async def _fast():
+            return await LC.classify(text, classifier_cfg=cfg.classifier, min_confidence=cfg.classifier.min_confidence)
+    else:
+        from saint import jev_classifier as JC
+        used, prefix = JC.CLASSIFIER_USED, "jev"
+        via_embedding = bool(cfg.classifier.embedding_backend)
+        settings = JC.JevSettings(
+            api_key_env=cfg.classifier.jev_api_key_env, model=cfg.classifier.jev_model,
+            base_url=cfg.classifier.jev_base_url, timeout_s=cfg.classifier.jev_timeout_s,
+            min_confidence=cfg.classifier.jev_min_confidence,
+        )
 
-    text = prompt[: cfg.classifier.max_input_chars]
+        async def _fast():
+            return await JC.classify(text, settings=settings, min_confidence=cfg.classifier.min_confidence)
+
     try:
-        result = await EC.classify(head, embed_backend, prompt=text, min_confidence=cfg.classifier.min_confidence,
-                                   feature_url=cfg.classifier.feature_url)
+        result = await _fast()
     except Exception as e:
-        _log_classifier_failure(embed_backend.name, ClassifierError(str(e)))
-        return await _llm("embedding_error")
-    if result is None:  # head not confident enough — defer to the LLM
-        return await _llm("embedding_defer")
+        _log_classifier_failure(used, ClassifierError(str(e)))
+        return await (_embedding(f"{prefix}_error") if via_embedding else _llm(f"{prefix}_error"))
+    if result is None:
+        return await (_embedding(f"{prefix}_defer") if via_embedding else _llm(f"{prefix}_defer"))
     return FallbackOutcome(
-        result=result, classifier_used=f"{embed_backend.name} (embed-head)",
-        fallback_reason=None, input_chars=len(text),
-        input_truncated_from=(len(prompt) if len(prompt) > len(text) else None),
+        result=result, classifier_used=used,
+        fallback_reason=None, input_chars=len(text), input_truncated_from=truncated_from,
     )
 
 def _outcome_from_labels(labels: CachedLabels, used: str, clf_input: str) -> FallbackOutcome:

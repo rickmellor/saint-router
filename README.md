@@ -71,18 +71,52 @@ WantedBy=default.target
 
 ## The classifier
 
-Two-tier: a trained **embedding head** (~30ms — embed the prompt, run two logistic
-heads) answers when confident; below `min_confidence` it defers to the **LLM
-classifier** (`classifier.backend`), whose labels are logged and become training data.
-That's a self-improving loop — the prompts the head is worst at are exactly what
-accumulates for the next retrain:
+Two-tier: a fast local classifier answers when confident; below the confidence gate it
+defers to the **LLM classifier** (`classifier.backend`), whose labels are logged and become
+training data. That's a self-improving loop — the prompts the fast classifier is worst at
+are exactly what accumulates for the next retrain. Three fast classifiers exist behind
+`classifier.mode`:
+
+- **`laya`** (default since 2026-09-26) — a fine-tuned **Laya** decision model
+  ([Convai](https://huggingface.co/convaiinnovations/laya), Apache 2.0) served locally by
+  `laya-serve` over the Jev `/v1/systemone` wire protocol (`tools/laya_saint_serve.py`). One
+  ~22 ms call answers both axes with probabilities; `laya_questions_path` is the exact question
+  text it was trained with — part of the model's input. Details, recipe and numbers:
+  [docs/local-classifier.md](docs/local-classifier.md).
+- **`embedding`** — the older **embedding head** (~30 ms: embed the prompt, run two logistic
+  heads over nomic embeddings). Kept trained as the rollback.
+- **`jev`** — TypeSafe's hosted Jev over the same protocol (never measured here; cloud only).
 
 ```
-saint classifier train              # distill the head from logged LLM labels
-saint classifier status             # head metadata + live coverage + rows banked
-saint classifier status --drift     # replay the head vs recent LLM labels (boundary drift)
+saint classifier status             # mode, model metadata, live coverage, rows banked
+saint classifier status --drift     # replay the live classifier vs recent LLM labels (boundary drift)
 saint classifier status --json      # machine-readable, for monitoring jobs (`healthy` bool)
+saint classifier train              # (embedding mode) distill the head from logged LLM labels
 ```
+
+### Laya in numbers (2026-09-26)
+
+- **Routing accuracy 94.6 % → 97.1 %** on the same 2,584 rubric-v3 prompts, with less training
+  data per fold (3-fold vs the head's 5-fold), so the gain is not a split artefact. Both error
+  types on the hard class dropped: fewer local jobs sent to the cloud, fewer cloud-worthy jobs kept
+  local.
+- **Coverage 83 % → 96 %** is the bigger win. The head deferred one request in six to a ~400 ms
+  LLM call; Laya answers almost everything itself in ~22 ms, so the median classification is
+  faster and the tail far shorter (96 % coverage at 97.6 % accuracy on what it answers).
+- **Out of the box it was useless, and the naive fine-tune was too.** Zero-shot Laya scored
+  60–75 % and over-called `hard` on a third of prompts. Freezing the encoder, or training the
+  backbone as a plain classifier in bf16, landed at 86–91 % — below the old head. What worked was
+  keeping Laya's own decision head and question interface and training it end to end with Laya's
+  proper-scoring loss and fp32 master weights on the existing labels; that recipe held at
+  96.5–97.1 % across every hyper-parameter variant tried.
+- **Integration reused the parked Jev branch.** Laya's server speaks the Jev wire format, so the
+  router change was a local URL, the trained question text on every request, and a `laya-saint`
+  user service on the GPU. Retiring the NVIDIA prompt-features model freed 2.4 GB there; the nomic
+  head was retrained without it as the rollback.
+- **What it does not buy: fewer retrains.** Trained on the curated seeds alone and tested on real
+  traffic, Laya generalised no better than the old head (88 % vs 90 %). The first drift run
+  already found a new prompt genre where Laya and the LLM labeller disagree on domain. A retrain
+  is ~6 min on the GPU; the rubric call on new genres stays human.
 
 ### Drift notification
 
@@ -113,7 +147,9 @@ The trainer only uses rows labeled by the LLM classifier — never the head's ow
 install, `tools/seed_classifier.py` runs a labeled JSONL dataset (`tools/seed_prompts*.jsonl`,
 1,200 prompts included) through the real routing pipeline and reports label agreement.
 Run seeding with `classifier.mode = "llm"`; flip to `"embedding"` after training. The
-serving process hot-reloads the head on file change — no restart after a retrain.
+serving process hot-reloads the head on file change — no restart after a retrain. In `laya`
+mode the same rule holds: Laya's own rows are never training data (`storage.fetch_training_rows`),
+and `--drift` replays the served Laya model over the LLM's labels since `labels_since`.
 
 ## Agent-loop economics
 
@@ -167,6 +203,20 @@ backend's static `base_url`/`model`. Otherwise the backend serves its **static b
   the override or the static baseline would serve.
 - saint **provides** per-request latency / TTFT / tokens to johnny's telemetry ingest
   spool (best-effort, non-fatal). See the `[johnny]` block in `config.example.toml`.
+
+## Health — `GET /health`
+
+SAINT has no inference engine of its own, so `/health` passes through what the seats report:
+every local backend's own `GET /health` (vLLM and llama.cpp serve it at the server root; 200 +
+empty body when the engine is up), probed once per distinct seat, in parallel. The answer is
+`200 {"status": "ok"}` when every seat SAINT currently routes to — johnny-bound and resolved
+`ready` — answers 200, else `503 {"status": "degraded"}`; either way `seats[]` carries each
+seat's endpoint, johnny state, the backends that map onto it, and the relayed status code /
+body (or the connection error). Loading/absent johnny seats are reported but not counted;
+static pins with no johnny binding (experiment seats) are advisory unless `?strict=1` — or
+counted always when no `[johnny]` resolver is configured. `GET /health?seat=<backend>` relays
+one seat's `/health` code and body verbatim (400 for a cloud backend, 404 for an unknown one).
+`/v1/models` remains the cheapest liveness probe of the router process itself.
 
 ## Discovery — `GET /status`
 

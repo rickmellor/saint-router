@@ -754,14 +754,15 @@ def _sync_retrain_flag(data: dict) -> None:
 
     fp = Path(os.path.expanduser(RETRAIN_FLAG_PATH))
     dr = data.get("drift")
+    fix = data.get("fix") or "saint classifier train"
     bad = bool(dr) and not dr.get("small_sample") and \
         dr.get("routing_agreement", 1.0) < _DRIFT_ROUTE_AGREEMENT_MIN
     if bad:
         reason = (f"classifier drift: routing agreement {dr['routing_agreement'] * 100:.0f}% "
-                  f"on {dr['sample']} recent deferrals — run: saint classifier train")
+                  f"on {dr['sample']} recent deferrals — run: {fix}")
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(_j.dumps({
-            "reason": reason, "metrics": dr, "fix": "saint classifier train",
+            "reason": reason, "metrics": dr, "fix": fix,
             "detected_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         }, indent=2))
     else:
@@ -811,12 +812,31 @@ def classifier_status(
 
     cfg = _load_or_die(config)
     path = Path(cfg.classifier.head_path or EC.DEFAULT_HEAD_PATH).expanduser()
+    laya_mode = cfg.classifier.mode == "laya"
     say(f"mode              = {cfg.classifier.mode}")
     say(f"embedding_backend = {cfg.classifier.embedding_backend}")
     say(f"min_confidence    = {cfg.classifier.min_confidence}")
     say(f"head_path         = {path}")
     data["mode"] = cfg.classifier.mode
     data["min_confidence"] = cfg.classifier.min_confidence
+    laya_since = None
+    if laya_mode:
+        from saint import laya_classifier as LC
+        meta = LC.load_training_meta(cfg.classifier.laya_questions_path)
+        # Drift window: Laya trains from the curated label files, whose logged rows end at
+        # labels_since; every LLM-labelled row after that is outside its training set. Fall
+        # back to the checkpoint's own date when labels_since is unset. (Retrain from newer
+        # logged labels → bump labels_since.)
+        laya_since = cfg.classifier.labels_since or LC.trained_at(cfg.classifier)
+        gate = cfg.classifier.laya_min_confidence if cfg.classifier.laya_min_confidence is not None else cfg.classifier.min_confidence
+        say(f"laya_url          = {cfg.classifier.laya_url}  (model {cfg.classifier.laya_model}, gate {gate})")
+        say(f"laya questions    = {cfg.classifier.laya_questions_path}")
+        say(f"laya trained_at   = {meta.get('trained_at')}  on {meta.get('trained_on')} prompts  (base {meta.get('base')})")
+        say(f"laya fallthrough  = {cfg.classifier.laya_fallthrough}")
+        data["laya"] = {"url": cfg.classifier.laya_url, "model": cfg.classifier.laya_model, "gate": gate,
+                        "trained_at": meta.get("trained_at"), "trained_on": meta.get("trained_on"),
+                        "fallthrough": cfg.classifier.laya_fallthrough}
+        data["fix"] = LC.RETRAIN_FIX
     head = None
     if path.exists():
         head = EC.Head.load(path)
@@ -835,19 +855,23 @@ def classifier_status(
     conn = open_db(Path(cfg.logging.db_path))
     # Window = routed traffic the CURRENT head has served (since trained_at); explain/
     # seeding rows are excluded so old dataset batches can't taint the stats.
-    mix = classifier_traffic_mix(conn, 500, since=head.trained_at if head else None)
-    classified = mix["head"] + mix["llm"]
+    fast = "laya" if laya_mode else "head"
+    window_since = laya_since if laya_mode else (head.trained_at if head else None)
+    mix = classifier_traffic_mix(conn, 500, since=window_since)
+    fast_n = mix["laya"] if laya_mode else mix["head"]
+    classified = mix["head"] + mix["laya"] + mix["llm"]
     say()
-    window = "routed traffic since head trained" if head else "recent routed traffic"
+    window = f"routed traffic since {fast} trained" if window_since else "recent routed traffic"
     say(f"{window} ({sum(mix.values())} classified rows, explain/seed excluded):")
+    say(f"  laya answered   = {mix['laya']}")
     say(f"  head answered   = {mix['head']}")
     say(f"  llm answered    = {mix['llm']}"
-        + ("  (head deferrals)" if cfg.classifier.mode == "embedding" else ""))
+        + (f"  ({fast} deferrals)" if cfg.classifier.mode in ("embedding", "laya") else ""))
     say(f"  cache/inherited = {mix['reused']}")
     data["traffic"] = dict(mix)
     if classified:
-        coverage = mix["head"] / classified
-        say(f"  head coverage   = {100 * coverage:.0f}% of fresh classifications")
+        coverage = fast_n / classified
+        say(f"  {fast} coverage   = {100 * coverage:.0f}% of fresh classifications")
         data["traffic"]["head_coverage"] = round(coverage, 3)
     new_rows = count_training_rows_since(conn, head.trained_at) if head else None
     if new_rows is not None:
@@ -855,15 +879,92 @@ def classifier_status(
         data["new_labeled_rows_since_training"] = new_rows
 
     suggestions: list[str] = []
-    if head is None:
+    if head is None and not laya_mode:
         suggestions.append("no head trained — run `saint classifier train`")
-    elif classified and mix["head"] / classified < 0.5 and (new_rows or 0) >= 100:
+    elif not laya_mode and classified and mix["head"] / classified < 0.5 and (new_rows or 0) >= 100:
         suggestions.append(
             f"head coverage {100 * mix['head'] / classified:.0f}% with {new_rows} new "
             "labeled rows banked — retrain to grow the confident region"
         )
 
-    if drift and head is not None:
+    if drift and laya_mode:
+        # Replay the served Laya model over the LLM labeller's rows since it was trained —
+        # the deferrals it declined plus anything labelled while it was down. Same metrics
+        # and the same flag as the head's check, so x-saint-retrain keeps working.
+        import asyncio
+
+        import httpx
+
+        from saint import laya_classifier as LC
+        from saint.policy import resolve_policy
+
+        raw = fetch_training_rows(conn, limit=limit * 3, since=laya_since)
+        seen: set[str] = set()
+        rows = []
+        for prompt, dom, cplx in raw:
+            if prompt in seen:
+                continue
+            seen.add(prompt)
+            rows.append((prompt, dom, cplx))
+            if len(rows) >= limit:
+                break
+        if not rows:
+            say("\ndrift: no LLM-labeled rows since the Laya model was trained to compare against")
+            data["drift"] = None
+        else:
+            small_n = "  (small sample)" if len(rows) < _DRIFT_MIN_SAMPLE else ""
+            say(f"\ndrift check: replaying laya over {len(rows)} LLM-labeled rows since training…{small_n}")
+            gate = cfg.classifier.laya_min_confidence if cfg.classifier.laya_min_confidence is not None else cfg.classifier.min_confidence
+
+            async def _replay():
+                sem = asyncio.Semaphore(8)
+                async with httpx.AsyncClient(timeout=cfg.classifier.laya_timeout_s * 5) as c:
+                    async def one(p):
+                        async with sem:
+                            return await LC.predict(p[: cfg.classifier.max_input_chars], classifier_cfg=cfg.classifier, client=c)
+                    return await asyncio.gather(*(one(r[0]) for r in rows))
+
+            try:
+                preds = asyncio.run(_replay())
+            except Exception as e:
+                _emit_err(f"laya replay failed ({cfg.classifier.laya_url}): {e}")
+                raise typer.Exit(2) from None
+            dom_hit = cplx_hit = route_hit = tier_hit = confident = 0
+            lat = []
+            for (_, dom, cplx), (dl, cl, conf, ms) in zip(rows, preds):
+                dom_hit += dl == dom
+                cplx_hit += cl == cplx
+                tier_hit += (cl == "hard") == (cplx == "hard")
+                confident += conf >= gate
+                lat.append(ms)
+                want = resolve_policy(cfg.routing.policy, "normal", dom, cplx)
+                got = resolve_policy(cfg.routing.policy, "normal", dl, cl)
+                route_hit += want == got
+            n = len(rows)
+            lat.sort()
+            say(f"  domain agreement     = {dom_hit}/{n} ({100 * dom_hit / n:.0f}%)")
+            say(f"  complexity agreement = {cplx_hit}/{n} ({100 * cplx_hit / n:.0f}%)")
+            say(f"  cloud/local agreement= {tier_hit}/{n} ({100 * tier_hit / n:.0f}%)  (hard vs not — the expensive axis)")
+            say(f"  routing agreement    = {route_hit}/{n} ({100 * route_hit / n:.0f}%)"
+                "  (policy.normal destinations; a domain miss moves local-coder<->local-chat)")
+            say(f"  laya confident on {confident}/{n} ({100 * confident / n:.0f}%) of these at gate {gate}"
+                f"  · replay latency p50 {lat[n // 2]} ms")
+            data["drift"] = {
+                "sample": n, "small_sample": n < _DRIFT_MIN_SAMPLE, "truncated_rows": 0,
+                "domain_agreement": round(dom_hit / n, 3),
+                "complexity_agreement": round(cplx_hit / n, 3),
+                "routing_agreement": round(route_hit / n, 3),
+                "cloud_local_agreement": round(tier_hit / n, 3),
+                "now_confident": round(confident / n, 3),
+            }
+            if route_hit / n < _DRIFT_ROUTE_AGREEMENT_MIN and n >= _DRIFT_MIN_SAMPLE:
+                axis = ("mostly the DOMAIN axis (local-coder vs local-chat) — adjudicate the disagreeing prompts before retraining"
+                        if tier_hit / n >= _DRIFT_ROUTE_AGREEMENT_MIN else "the cloud/local axis")
+                suggestions.append(
+                    f"boundary drift: laya disagrees with the LLM's routing on "
+                    f"{n - route_hit}/{n} recent deferrals ({axis}) — {LC.RETRAIN_FIX}"
+                )
+    elif drift and head is not None:
         eb_name = cfg.classifier.embedding_backend
         if not eb_name or eb_name not in cfg.backends:
             _emit_err("classifier.embedding_backend must be set for --drift")

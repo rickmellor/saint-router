@@ -193,7 +193,9 @@ def fetch_training_rows(
 
     Excludes rows labeled by the embedding head itself (no self-distillation feedback
     loop) and by the routing caches ('cache'/'inherited' — reused labels, not fresh
-    classifier judgments). `since` restricts to rows after an ISO-8601 UTC timestamp
+    classifier judgments). Rows labelled by Jev or by the fine-tuned Laya model are excluded
+    too: the LLM labeller is the reference every faster classifier is measured and trained
+    against, so their own answers must never feed the training set. `since` restricts to rows after an ISO-8601 UTC timestamp
     (drift checks use the head's trained_at so the sample isn't its own training set)."""
     return conn.execute(
         "SELECT prompt_content, classifier_domain, classifier_complexity FROM requests "
@@ -202,7 +204,8 @@ def fetch_training_rows(
         "AND ts > ? "
         "AND (classifier_used IS NULL OR ("
         "  classifier_used NOT LIKE '%embed-head%' "
-        "  AND classifier_used NOT IN ('cache', 'inherited')"
+        "  AND classifier_used NOT LIKE '%jev%' "
+        "  AND classifier_used NOT IN ('cache', 'inherited', 'laya')"
         ")) "
         "ORDER BY id DESC LIMIT ?",
         (since or "", limit),
@@ -215,7 +218,8 @@ def classifier_traffic_mix(
     """How the last `limit` classified ROUTED requests were labeled.
 
     head   — embedding head answered (confident region)
-    llm    — LLM classifier answered (head deferral, or mode='llm')
+    laya   — the Laya / Jev decision model answered (rows 'laya' / 'typesafe-jev')
+    llm    — LLM classifier answered (fast-classifier deferral, or mode='llm')
     reused — routing caches ('cache'/'inherited'); downstream of an earlier decision
 
     Excludes saint-explain rows (diagnostics and dataset seeding, not traffic).
@@ -231,10 +235,12 @@ def classifier_traffic_mix(
         "  ORDER BY id DESC LIMIT ?)",
         (since or "", limit),
     ).fetchall()
-    mix = {"head": 0, "llm": 0, "reused": 0}
+    mix = {"head": 0, "laya": 0, "llm": 0, "reused": 0}
     for (used,) in rows:
         if "embed-head" in used:
             mix["head"] += 1
+        elif used == "laya" or "jev" in used:
+            mix["laya"] += 1
         elif used in ("cache", "inherited"):
             mix["reused"] += 1
         else:
@@ -251,7 +257,8 @@ def count_training_rows_since(conn: sqlite3.Connection, ts: str) -> int:
         "AND classifier_complexity IS NOT NULL "
         "AND (classifier_used IS NULL OR ("
         "  classifier_used NOT LIKE '%embed-head%' "
-        "  AND classifier_used NOT IN ('cache', 'inherited')"
+        "  AND classifier_used NOT LIKE '%jev%' "
+        "  AND classifier_used NOT IN ('cache', 'inherited', 'laya')"
         ")) AND ts > ?",
         (ts,),
     ).fetchone()[0]

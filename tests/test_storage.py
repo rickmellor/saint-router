@@ -207,11 +207,11 @@ def test_classifier_traffic_mix_buckets(tmp_path):
     from saint.storage import classifier_traffic_mix
     conn = open_db(tmp_path / "log.sqlite")
     for used in ("local-embed (embed-head)", "local-embed (embed-head)", "local-chat",
-                 "cache", "inherited"):
+                 "cache", "inherited", "laya", "typesafe-jev"):
         log_request(conn, _row(classifier_used=used))
     log_request(conn, _row(classifier_used=None))  # unclassified (pinned) — excluded
     mix = classifier_traffic_mix(conn, limit=100)
-    assert mix == {"head": 2, "llm": 1, "reused": 2}
+    assert mix == {"head": 2, "laya": 2, "llm": 1, "reused": 2}
 
 
 def test_count_training_rows_since(tmp_path):
@@ -233,10 +233,10 @@ def test_traffic_mix_excludes_explain_and_respects_since(tmp_path):
     log_request(conn, _row(classifier_used="local-chat", model_field="saint-explain"))  # seed/diagnostic
     log_request(conn, _row(classifier_used="local-chat"))
     log_request(conn, _row(classifier_used="local-embed (embed-head)"))
-    assert classifier_traffic_mix(conn, 100) == {"head": 1, "llm": 1, "reused": 0}
+    assert classifier_traffic_mix(conn, 100) == {"head": 1, "laya": 0, "llm": 1, "reused": 0}
     # a future `since` excludes everything
     assert classifier_traffic_mix(conn, 100, since="2999-01-01T00:00:00+00:00") == \
-        {"head": 0, "llm": 0, "reused": 0}
+        {"head": 0, "laya": 0, "llm": 0, "reused": 0}
 
 
 def test_fetch_training_rows_since_filter(tmp_path):

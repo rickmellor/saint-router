@@ -96,7 +96,7 @@ class ClassifierConfig:
     max_input_chars: int
     timeout_s: int
     prompt_template_path: str | None
-    mode: str = "llm"                     # "llm" | "embedding"
+    mode: str = "llm"                     # "llm" | "embedding" | "jev" | "laya"  (jev/laya fall through to the LLM labeller, optionally via the embedding head)
     embedding_backend: str | None = None  # backend serving /v1/embeddings (e.g. nomic-embed via johnny)
     head_path: str | None = None          # trained head .npz (default: ~/.config/saint/classifier_head.npz)
     oversize: str = "fallback"   # "fallback" (whole prompt → fallback_backend) | "truncate" (head+tail → normal chain)
@@ -104,6 +104,17 @@ class ClassifierConfig:
     label_files: tuple[str, ...] = ()     # jsonl {prompt, domain, complexity}: curated labels `classifier train` always includes
     labels_since: str | None = None       # ISO-8601 UTC: ignore logged labels older than this (e.g. a rubric change)
     min_confidence: float = 0.6           # below this the embedding head defers to the LLM classifier
+    jev_model: str = "jev-1.13.0"          # mode="jev": pinned TypeSafe model id (aliases drift)
+    jev_api_key_env: str = "TYPESAFE_API_KEY"  # env var holding the key (never the key itself)
+    jev_base_url: str = "https://api.typesafe.ai"
+    jev_timeout_s: float = 3.0            # hot path — a slow Jev loses to the local head
+    jev_min_confidence: float | None = None    # None → min_confidence
+    laya_url: str = "http://127.0.0.1:8130"   # mode="laya": local laya-serve (Jev wire protocol), see tools/laya_saint_serve.py
+    laya_model: str = "english"               # checkpoint name the server maps to SAINT's fine-tuned Laya
+    laya_questions_path: str | None = None    # saint-training.json next to the checkpoint: the EXACT question text it was trained with
+    laya_timeout_s: float = 2.0
+    laya_min_confidence: float | None = None  # gate on the answer's max probability; None → min_confidence
+    laya_fallthrough: str = "llm"             # "llm" (default) | "embedding": where an unsure/unavailable Laya sends the request
     ignore_after: tuple[str, ...] = ()    # truncate CLASSIFIER input at the first of these markers
                                           # (client-injected context, e.g. agent memory recall);
                                           # dispatch always forwards the full message untouched
@@ -210,9 +221,23 @@ def _validate(cfg: Config) -> list[str]:
         errors.append(
             f"classifier.fallback_backend '{fb}' is not defined in [backends]"
         )
-    if cfg.classifier.mode not in ("llm", "embedding"):
-        errors.append(f"classifier.mode '{cfg.classifier.mode}' must be 'llm' or 'embedding'")
-    if cfg.classifier.mode == "embedding":
+    if cfg.classifier.mode not in ("llm", "embedding", "jev", "laya"):
+        errors.append(f"classifier.mode '{cfg.classifier.mode}' must be 'llm', 'embedding', 'jev' or 'laya'")
+    if cfg.classifier.mode == "laya":
+        qp = cfg.classifier.laya_questions_path
+        if not qp:
+            errors.append("classifier.laya_questions_path is required when classifier.mode = 'laya' "
+                          "(the saint-training.json written next to the fine-tuned checkpoint)")
+        elif not Path(qp).expanduser().is_file():
+            errors.append(f"classifier.laya_questions_path '{qp}' does not exist")
+        if cfg.classifier.laya_fallthrough not in ("llm", "embedding"):
+            errors.append("classifier.laya_fallthrough must be 'llm' or 'embedding'")
+    # jev/laya keep the embedding head as a fall-through only when asked; with none configured
+    # they defer straight to the LLM labeller.
+    needs_head = (cfg.classifier.mode == "embedding"
+                  or (cfg.classifier.mode == "jev" and cfg.classifier.embedding_backend)
+                  or (cfg.classifier.mode == "laya" and cfg.classifier.laya_fallthrough == "embedding"))
+    if needs_head:
         eb = cfg.classifier.embedding_backend
         if not eb:
             errors.append("classifier.embedding_backend is required when classifier.mode = 'embedding'")
@@ -466,6 +491,17 @@ def load_config(path: Path) -> Config:
         embedding_backend=cls_raw.get("embedding_backend"),
         head_path=_expand(cls_raw["head_path"]) if cls_raw.get("head_path") else None,
         min_confidence=float(cls_raw.get("min_confidence", 0.6)),
+        jev_model=cls_raw.get("jev_model", "jev-1.13.0"),
+        jev_api_key_env=cls_raw.get("jev_api_key_env", "TYPESAFE_API_KEY"),
+        jev_base_url=cls_raw.get("jev_base_url", "https://api.typesafe.ai"),
+        jev_timeout_s=float(cls_raw.get("jev_timeout_s", 3.0)),
+        jev_min_confidence=(float(cls_raw["jev_min_confidence"]) if cls_raw.get("jev_min_confidence") is not None else None),
+        laya_url=cls_raw.get("laya_url", "http://127.0.0.1:8130"),
+        laya_model=cls_raw.get("laya_model", "english"),
+        laya_questions_path=_expand(cls_raw["laya_questions_path"]) if cls_raw.get("laya_questions_path") else None,
+        laya_timeout_s=float(cls_raw.get("laya_timeout_s", 2.0)),
+        laya_min_confidence=(float(cls_raw["laya_min_confidence"]) if cls_raw.get("laya_min_confidence") is not None else None),
+        laya_fallthrough=cls_raw.get("laya_fallthrough", "llm"),
         ignore_after=tuple(cls_raw.get("ignore_after", ())),
     )
 
