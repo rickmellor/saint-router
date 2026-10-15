@@ -253,7 +253,7 @@ setup. Install with the extra: `uv tool install 'saint-router[bedrock]'`.
 
 ## Observability & accounting
 
-Every response carries routing metadata headers — `x-saint-backend`, `x-saint-domain`,
+Every response carries routing metadata headers — `x-saint-backend` (the role/backend), `x-saint-model` (the model that answered) and `x-saint-seat` (the physical johnny seat) when known, `x-saint-domain`,
 `x-saint-complexity`, `x-saint-classifier`, `x-saint-urgency`, `x-saint-state`,
 `x-saint-request-id`, `x-saint-pinned` when a pin was honoured, `x-saint-decided` when a
 dispatch fallback changed the server, and `x-saint-retrain` while the classifier drift flag is
