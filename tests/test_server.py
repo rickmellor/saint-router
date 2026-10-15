@@ -343,6 +343,7 @@ def test_route_headers_on_classified_request(tmp_path):
             "model": "saint-auto",
             "messages": [{"role": "user", "content": "write me a widget parser"}]})
     assert resp.headers["x-saint-backend"] == "local-coder"
+    assert resp.headers["x-saint-model"] == cfg.backends["local-coder"].model   # the model that answered, not just the role
     assert resp.headers["x-saint-domain"] == "code"
     assert resp.headers["x-saint-complexity"] == "medium"
     assert "x-saint-decided" not in resp.headers  # no fallback hop taken

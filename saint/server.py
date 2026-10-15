@@ -280,6 +280,12 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
         h["x-saint-decided"] = decision.backend  # dispatch fallback changed the server
     if eff is not None and eff.state_at_dispatch:
         h["x-saint-state"] = eff.state_at_dispatch
+    # which MODEL answered (the live johnny seat's served id, or the static backend's model) and on which physical seat —
+    # `backend` alone is only the role; with chat = Gemma and coder/workers = Qwen (2026-10-14) clients want the model name
+    if eff is not None and getattr(eff, "backend", None) is not None and getattr(eff.backend, "model", None):
+        h["x-saint-model"] = eff.backend.model
+    if eff is not None and getattr(eff, "johnny_seat", None):
+        h["x-saint-seat"] = eff.johnny_seat
     if eff is not None and getattr(eff, "spilled_from", None):
         h["x-saint-spill"] = f"{eff.spilled_from}->{eff.johnny_seat}"
     if eff is not None and getattr(eff, "seat_load", None) is not None:
