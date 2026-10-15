@@ -83,8 +83,11 @@ now serves nomic-embed only unless started with `--features`).
   train the head (`storage.fetch_training_rows`); the LLM labeller stays the reference. `saint classifier status --drift`
   replays Laya over the LLM-labelled rows since `labels_since` and reports domain / complexity / **cloud-local** / routing
   agreement; the retrain flag + `x-saint-retrain` carry Laya's fix.
-- Train / export / deploy (~6 min on the 4080, labels outside the repo; needs `pip install "laya[serve]"` in a torch env and
-  ~12 GB free VRAM — stop the judge first):
+- Train / export / deploy (~6–10 min on the 4080, labels outside the repo; needs `pip install "laya[serve]"` in a torch env and
+  ~12 GB free VRAM — stop the seats on that card first; `--bs 8` hit OOM at 14.9 GB on 2026-10-14, `--bs 4` trains in 11.6 GB).
+  When the drift flag names disagreeing prompts: dump them, adjudicate against the rubric, append the rows (with the agreeing ones)
+  to the traffic label file, retrain, then bump `classifier.labels_since` past them — the drift check treats the LLM labeller as the
+  reference, so adjudications that overrule it keep showing as "disagreements" until they leave the window:
 
       python tools/classifier_eval/laya_finetune.py --variant full --questions both --epochs 4 --head-lr 1e-4 --no-cv --final --tag v4
       python tools/classifier_eval/laya_export_checkpoint.py ~/.config/saint/classifier_eval/laya-ft/laya_saint_v4.pt \
