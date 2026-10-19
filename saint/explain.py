@@ -9,13 +9,16 @@ def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> st
     lines: list[str] = []
     lines.append(f"Routing decision: {decision.backend}")
     backend = cfg.backends.get(decision.backend)
-    if backend:
+    if backend and (backend.provider or backend.model):
         lines.append(f"  Target: {backend.provider} {backend.model}")
     lines.append("")
 
     lines.append(f"Prefixes parsed:    {decision.parsed.raw or '(none)'}")
     lines.append(f"Effective urgency:  {decision.urgency}")
     lines.append(f"Required caps:      {', '.join(sorted(decision.required_capabilities)) or '(none)'}")
+
+    if getattr(decision, "client_rule", None):
+        lines.append(f"Client rule:        {decision.client_rule} → {decision.backend} (classifier skipped)")
 
     if decision.pinned_backend:
         lines.append(f"Pinned backend:     {decision.pinned_backend} (classifier skipped)")
@@ -57,7 +60,19 @@ def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> st
         from saint.binding import describe_for_explain
 
         d = describe_for_explain(cfg, decision.backend, resolver)
-        if d:
+        if d and d.get("state") == "pool":
+            lines.append("")
+            for m in d.get("members", []):
+                seat = f" [seat {m['seat']}]" if m.get("seat") else ""
+                caps = (" caps " + ",".join(sorted(m.get("capabilities") or []))
+                        if m.get("capabilities") else "")
+                lines.append(f"  member {m['name']}: {m['state']}{seat}{caps}")
+            b = cfg.backends.get(decision.backend)
+            if b is not None:
+                mode = "sticky" if b.pool_sticky else "per-request"
+                lines.append(f"  next pick:          {d.get('next') or '(none)'} "
+                             f"({b.pool_strategy}, {mode})")
+        elif d:
             lines.append("")
             lines.append(f"johnny seat:        {d.get('seat') or '(none)'} [{d['state']}]")
             caps = frozenset(d.get("capabilities") or ())

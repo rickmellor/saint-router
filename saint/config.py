@@ -71,6 +71,16 @@ class BackendConfig:
     # implicit). Static declaration — a johnny seat's live capabilities (from `johnny resolve`)
     # override it while the seat is ready. See saint/capabilities.py.
     capabilities: tuple[str, ...] = ()
+    # --- pool backend: strict load balancing across member backends (see saint/binding.py) ---
+    pool: tuple[str, ...] = ()          # member backend names; config order == rotation order
+    pool_strategy: str = "round_robin"  # "round_robin" | "least_loaded"
+    pool_sticky: bool = True            # a conversation keeps the member that served it (vLLM prefix cache)
+    local_only: bool = False            # never leave this backend: no on_error / while_loading /
+                                        # default_on_failure hop → 503 when nothing is ready
+
+    @property
+    def is_pool(self) -> bool:
+        return bool(self.pool)
 
     @property
     def johnny_bound(self) -> bool:
@@ -83,6 +93,18 @@ class BackendConfig:
     @property
     def static_capabilities(self) -> frozenset[str]:
         return frozenset(self.capabilities)
+
+
+@dataclass(frozen=True)
+class ClientRule:
+    """Where a client's UNPINNED turns go, keyed on its User-Agent. A client that identifies
+    itself (Claude Code sends `claude-cli/...`) can be pinned to a backend — typically a local
+    pool — without the classifier ever running. Explicit `saint-<backend>` model ids and `!`/`@`
+    prefix pins still win; the rule is only the fallback for an otherwise-unpinned turn."""
+
+    name: str
+    user_agent: str   # case-insensitive PREFIX match on the User-Agent header
+    backend: str      # backend name (may be a pool)
 
 
 @dataclass(frozen=True)
@@ -208,6 +230,7 @@ class Config:
     cache: CacheConfig = CacheConfig()
     bedrock: BedrockConfig | None = None  # SSO recovery knobs; optional
     energy: EnergyConfig = EnergyConfig()
+    clients: tuple[ClientRule, ...] = ()  # User-Agent → backend rules; first match (config order) wins
 
     @property
     def has_bedrock(self) -> bool:
@@ -336,7 +359,7 @@ def _validate(cfg: Config) -> list[str]:
     # --- static baseline + johnny binding rules ---
     bound = [n for n, b in cfg.backends.items() if b.johnny_bound]
     for name, b in cfg.backends.items():
-        if not b.johnny_only and (not b.provider or not b.model):
+        if not b.johnny_only and not b.is_pool and (not b.provider or not b.model):
             errors.append(
                 f"backend '{name}' lacks static provider/model (required unless johnny_only = true)"
             )
@@ -416,6 +439,32 @@ def _validate(cfg: Config) -> list[str]:
         errors.append(
             f"cache.anthropic_cache_ttl '{c.anthropic_cache_ttl}' must be '5m' (default) or '1h'"
         )
+
+    # --- pool backends ---
+    for name, b in cfg.backends.items():
+        if not b.is_pool:
+            continue
+        for member in b.pool:
+            if member not in backend_names:
+                errors.append(f"backend '{name}' pool member '{member}' is not defined in [backends]")
+            elif cfg.backends[member].is_pool:
+                errors.append(f"backend '{name}' pool member '{member}' is itself a pool (no nesting)")
+        if b.pool_strategy not in ("round_robin", "least_loaded"):
+            errors.append(f"backend '{name}' strategy '{b.pool_strategy}'"
+                          " must be 'round_robin' or 'least_loaded'")
+        if b.johnny_role or b.johnny_seat:
+            errors.append(f"backend '{name}' is a pool; set johnny_role/johnny_seat on its members, not the pool")
+        if b.spill:
+            errors.append(f"backend '{name}' is a pool; 'spill' does not apply (the pool walks its members)")
+        if b.local_only and b.on_error:
+            errors.append(f"backend '{name}' local_only = true rejects on_error (a pool must not leave the pool)")
+
+    # --- client rules ---
+    for r in cfg.clients:
+        if not r.user_agent:
+            errors.append(f"clients rule '{r.name}' has an empty user_agent")
+        if r.backend not in backend_names:
+            errors.append(f"clients rule '{r.name}' backend '{r.backend}' is not defined in [backends]")
 
     return errors
 
@@ -510,6 +559,10 @@ def load_config(path: Path) -> Config:
             gpus=int(b["gpus"]) if b.get("gpus") is not None else None,
             watts=float(b["watts"]) if b.get("watts") is not None else None,
             tok_s=float(b["tok_s"]) if b.get("tok_s") is not None else None,
+            pool=tuple(b.get("pool", ())),
+            pool_strategy=str(b.get("strategy", "round_robin")),
+            pool_sticky=bool(b.get("sticky", True)),
+            local_only=bool(b.get("local_only", False)),
         )
 
     # Auto-configure provider ladders from key presence (explicit [backends] already win).
@@ -619,6 +672,12 @@ def load_config(path: Path) -> Config:
         baseline=en_raw.get("baseline"),
     )
 
+    clients = tuple(
+        ClientRule(name=str(c.get("name", "")), user_agent=str(c.get("user_agent", "")),
+                   backend=str(c.get("backend", "")))
+        for c in raw.get("clients", [])
+    )
+
     cfg = Config(
         server=server,
         backends=backends,
@@ -629,6 +688,7 @@ def load_config(path: Path) -> Config:
         cache=cache,
         bedrock=bedrock,
         energy=energy,
+        clients=clients,
     )
     errors = _validate(cfg)
     if errors:

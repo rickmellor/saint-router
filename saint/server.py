@@ -57,6 +57,23 @@ def _capability_response(error_kind, anthropic: bool = False):
     return JSONResponse(status_code=400, content={"error": {
         "message": msg, "type": "invalid_request_error", "code": "capability_unavailable"}})
 
+
+def _is_pool_unavailable(error_kind) -> bool:
+    return bool(error_kind) and str(error_kind).startswith("PoolUnavailable")
+
+
+def _pool_response(error_kind, anthropic: bool = False):
+    """503: a local_only pool had no ready member. Nothing was wrong with the request and no
+    cloud tier will take it — the seats are merely loading/down — so say so with retry-after and
+    let the client retry. Claude Code retries overloaded_error, which is exactly the behaviour
+    we want while a seat warms up."""
+    msg = str(error_kind).split("PoolUnavailable:", 1)[1].strip() if "PoolUnavailable:" in str(error_kind) else str(error_kind)
+    if anthropic:
+        from saint.anthropic_api import anthropic_error
+        return anthropic_error(503, "overloaded_error", msg, headers={"retry-after": "5"})
+    return JSONResponse(status_code=503, headers={"retry-after": "5"}, content={"error": {
+        "message": msg, "type": "server_error", "code": "no_local_seat"}})
+
 # Chat-completion kwargs we forward to the destination backend, beyond
 # `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
 # Anything not in this list is silently dropped. Add to v1.x as needed.
@@ -178,7 +195,9 @@ def _provide_telemetry_for(eff, latency_ms, ttft_ms, tokens_in, tokens_out, succ
 def _emit_summary(decision, model_field: str, gen_ms: int,
                   cache_read=None, cache_write=None, served=None) -> None:
     out = decision.classifier_outcome
-    if decision.classifier_result:
+    if getattr(decision, "client_rule", None):
+        cls_part = f"client:{decision.client_rule}"
+    elif decision.classifier_result:
         cls_part = (f"classified={decision.classifier_result.domain}"
                     f"/{decision.classifier_result.complexity}")
         if out is not None and out.classifier_used in ("cache", "inherited"):
@@ -303,6 +322,8 @@ def _route_headers(decision, served: str, eff) -> dict[str, str]:
         h["x-saint-model"] = eff.backend.model
     if eff is not None and getattr(eff, "johnny_seat", None):
         h["x-saint-seat"] = eff.johnny_seat
+    if eff is not None and getattr(eff, "pool_member", None):
+        h["x-saint-pool-member"] = eff.pool_member
     if eff is not None and getattr(eff, "spilled_from", None):
         h["x-saint-spill"] = f"{eff.spilled_from}->{eff.johnny_seat}"
     if eff is not None and getattr(eff, "seat_load", None) is not None:
@@ -602,6 +623,13 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 continue                              # infra seats, not chat choices
             e: dict[str, Any] = {"id": f"saint-{name}", "backend": name,
                                  "aliases": list(b.aliases)}
+            if b.is_pool:
+                # A pool is not a seat — no model, no endpoint, no per-member resolve (that would
+                # make this endpoint as slow as the pool has members). Its readiness is the members',
+                # which /status already reports for them individually.
+                e.update(kind="pool", members=list(b.pool), state="ready", rank=1)
+                choices.append(e)
+                continue
             if b.johnny_bound:
                 res = resolver.resolve(b.johnny_target) if resolver else None
                 model = res.model if (res and res.model) else b.model
@@ -657,6 +685,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             decision = await decide_route(
                 cfg=cfg, model_field=model_field, messages=messages,
                 caches=app.state.route_caches, session_id=session_id,
+                client_user_agent=request.headers.get("user-agent"),
             )
         except UnknownPrefixError as e:
             return JSONResponse(
@@ -717,6 +746,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
                 bedrock_state=app.state.bedrock_state,
                 required=decision.required_capabilities,
+                conversation_key=decision.conversation_key, caches=app.state.route_caches,
             )
 
             if result is None:
@@ -729,6 +759,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 ))
                 if _is_billing(error_kind): return _billing_response(error_kind)
                 if _is_capability(error_kind): return _capability_response(error_kind)
+                if _is_pool_unavailable(error_kind): return _pool_response(error_kind)
                 raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
 
             upstream, first_chunk = result.value
@@ -813,6 +844,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
             bedrock_state=app.state.bedrock_state,
             required=decision.required_capabilities,
+            conversation_key=decision.conversation_key, caches=app.state.route_caches,
         )
         success = result is not None
         served = result.backend if result else None
@@ -850,6 +882,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         if not success:
             if _is_billing(error_kind): return _billing_response(error_kind)
             if _is_capability(error_kind): return _capability_response(error_kind)
+            if _is_pool_unavailable(error_kind): return _pool_response(error_kind)
             raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
         payload = response if isinstance(response, dict) else response.model_dump()
         return JSONResponse(content=payload,
@@ -896,6 +929,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 # openai_view neutralizes tool_result blocks, so an image riding back inside a
                 # tool result would go undetected — capabilities come from the RAW body.
                 required_override=required_capabilities(body.get("messages", [])),
+                client_user_agent=request.headers.get("user-agent"),
             )
         except UnknownPrefixError as e:
             return anthropic_error(400, "invalid_request_error", str(e))
@@ -944,22 +978,24 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     pass
             return out_p
 
-        def _refresh_affinity(served: str):
+        def _refresh_affinity(served: str, eff=None):
             # Record the backend that actually minted this turn's thinking, so later
             # turns (even pinned ones, which decide_route leaves label-less) know the
-            # continuity backend for the thinking-signature guard.
+            # continuity backend for the thinking-signature guard. For a pool the member
+            # that served is what sticky pools key on, so record that, not the pool name.
             caches = app.state.route_caches
             if not decision.conversation_key or caches.conversations is None:
                 return
             from saint.route_cache import ConversationEntry
+            target = getattr(eff, "pool_member", None) or served
             entry = caches.conversations.get(decision.conversation_key)
             if entry is None:
                 caches.conversations.set(decision.conversation_key,
-                                         ConversationEntry(backend=served))
-            elif entry.backend != served:
+                                         ConversationEntry(backend=target))
+            elif entry.backend != target:
                 from dataclasses import replace as _replace
                 caches.conversations.set(decision.conversation_key,
-                                         _replace(entry, backend=served))
+                                         _replace(entry, backend=target))
 
         def _log_state(eff, served: str) -> str | None:
             return "dispatch_fallback" if served != decision.backend else eff.state_at_dispatch
@@ -1007,6 +1043,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
                 bedrock_state=app.state.bedrock_state,
                 required=decision.required_capabilities,
+                conversation_key=decision.conversation_key, caches=app.state.route_caches,
             )
             if result is None:
                 _log_messages_row(served=None, eff=last_eff,
@@ -1015,6 +1052,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                   backend_override=None)
                 if _is_billing(error_kind): return _billing_response(error_kind, anthropic=True)
                 if _is_capability(error_kind): return _capability_response(error_kind, anthropic=True)
+                if _is_pool_unavailable(error_kind): return _pool_response(error_kind, anthropic=True)
                 return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
             upstream, first_chunk = result.value
@@ -1053,7 +1091,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     ttft = (int((first_chunk_ts - started) * 1000)
                             if first_chunk_ts else None)
                     if success_local:
-                        _refresh_affinity(result.backend)
+                        _refresh_affinity(result.backend, result.eff)
                     _log_messages_row(served=result.backend, eff=result.eff,
                                       latency_ms=elapsed_ms, success=success_local,
                                       error_kind=error_kind_local, usage=tracker.usage,
@@ -1081,6 +1119,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
             bedrock_state=app.state.bedrock_state,
             required=decision.required_capabilities,
+            conversation_key=decision.conversation_key, caches=app.state.route_caches,
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -1090,10 +1129,11 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                               backend_override=None)
             if _is_billing(error_kind): return _billing_response(error_kind, anthropic=True)
             if _is_capability(error_kind): return _capability_response(error_kind, anthropic=True)
+            if _is_pool_unavailable(error_kind): return _pool_response(error_kind, anthropic=True)
             return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
         usage = anthropic_usage(result.value)
-        _refresh_affinity(result.backend)
+        _refresh_affinity(result.backend, result.eff)
         _log_messages_row(served=result.backend, eff=result.eff, latency_ms=latency_ms,
                           success=True, error_kind=None, usage=usage,
                           backend_override=result.backend)

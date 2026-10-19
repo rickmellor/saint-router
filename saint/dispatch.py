@@ -88,6 +88,8 @@ async def run_candidates(
     attempt: Callable[[Effective], Awaitable[Any]],
     bedrock_state: BedrockRuntime | None = None,
     required: frozenset[str] = frozenset(),
+    conversation_key: str | None = None,  # pool stickiness: accepted here so server.py's call sites
+    caches=None,                          # are valid on this branch; the pool walk uses them (binding.pool_order)
 ) -> tuple[Served | None, str | None, Effective | None]:
     """Try candidates in order; return (served, last_error_kind, last_effective).
 
