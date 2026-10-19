@@ -13,7 +13,7 @@ authors = [{ name = "Rick Mellor" }]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "litellm>=1.55",
+    "litellm>=1.91",  # <1.91 (1.89 seen 2026-10-19) drops the first delta after each content block in the Messages→chat streaming bridge (empty replies in Claude Code)
     "httpx>=0.27",
     "typer>=0.12",
     "numpy>=1.26",  # embedding-classifier head (saint/embed_classifier.py)
