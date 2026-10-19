@@ -181,6 +181,21 @@ async def test_decide_multimodal_routes_to_default_on_failure():
     assert decision.multimodal is True
 
 
+async def test_decide_multimodal_prefix_pin_wins_and_is_stripped():
+    cfg = _cfg()
+    decision = await decide_route(
+        cfg=cfg, model_field="saint-auto",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "!opus look at this"},
+            {"type": "image_url", "image_url": {"url": "data:..."}},
+        ]}],
+    )
+    assert decision.backend == "cloud-large"
+    assert decision.pinned_backend == "cloud-large"
+    assert decision.multimodal is True
+    assert decision.stripped_last_user == "look at this"
+
+
 async def test_decide_empty_messages_defaults_general_trivial():
     cfg = _cfg()
     decision = await decide_route(cfg=cfg, model_field="saint-auto", messages=[])
@@ -203,6 +218,27 @@ def test_apply_stripping_replaces_last_user_content():
     assert out is not messages
     assert out[-1]["content"] == "please"
     assert out[-3]["content"] == "earlier"
+
+
+def test_apply_stripping_keeps_image_blocks_when_nothing_stripped():
+    img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    content = [{"type": "text", "text": "describe this"}, img]
+    messages = [{"role": "user", "content": content}]
+    out = apply_stripping(messages, stripped_last_user="describe this")
+    assert out[-1]["content"] == content           # block content never flattened to a string
+    assert out[-1]["content"][1] is img
+
+
+def test_apply_stripping_trims_prefix_from_text_block_and_keeps_image():
+    img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "@coder describe this"}, img, {"type": "text", "text": "in one line"},
+    ]}]
+    out = apply_stripping(messages, stripped_last_user="describe this\nin one line")
+    assert out[-1]["content"] == [
+        {"type": "text", "text": "describe this"}, img, {"type": "text", "text": "in one line"},
+    ]
+    assert messages[0]["content"][0]["text"] == "@coder describe this"   # copy-on-write
 
 
 def test_apply_stripping_no_user_message_unchanged():

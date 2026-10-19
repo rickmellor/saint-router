@@ -257,7 +257,7 @@ async def decide_route(
 
     parsed = ParsedPrefixes(urgency=None, pinned_backend=None,
                              stripped=full_text or "", raw="")
-    if full_text is not None and not multimodal:
+    if full_text is not None:   # image-bearing turns honor !/@ pins too (2026-10-19)
         parsed = parse_prefixes(full_text, urgencies, backend_alias_map)
 
     pinned_via_model: str | None = None
@@ -290,7 +290,7 @@ async def decide_route(
             classifier_outcome=None, classifier_result=None,
             multimodal=True, model_field=model_field,
             last_user_content_original=last_text_original,
-            stripped_last_user=None,
+            stripped_last_user=parsed.stripped if full_text is not None else None,
             conversation_key=conv_key, prev_backend=prev_backend,
         )
 
@@ -385,14 +385,36 @@ async def decide_route(
 def apply_stripping(
     messages: list[dict[str, Any]], stripped_last_user: str | None,
 ) -> list[dict[str, Any]]:
-    """Return a new messages list with the last user message's content replaced by `stripped_last_user`."""
+    """Return a new messages list with the routing prefix removed from the last user message.
+
+    String content is replaced by `stripped_last_user` outright. Block content (OpenAI
+    content-part lists: text + image_url/input_audio/…) is NEVER flattened to a string —
+    that silently dropped every image on pinned/classified turns (2026-10-19) — only the
+    leading characters the prefix parser removed are trimmed from the text parts, in order.
+    """
     if stripped_last_user is None:
         return list(messages)
     out = [dict(m) for m in messages]
     for i in range(len(out) - 1, -1, -1):
-        if out[i].get("role") == "user":
+        if out[i].get("role") != "user":
+            continue
+        content = out[i].get("content")
+        if not isinstance(content, list):
             out[i]["content"] = stripped_last_user
             break
+        removed = len(_content_text(content)) - len(stripped_last_user)
+        if removed <= 0:
+            break                                   # no prefix was stripped: forward as-is
+        blocks = []
+        for b in content:
+            if removed > 0 and isinstance(b, dict) and b.get("type") == "text":
+                text = b.get("text") or ""
+                cut = min(removed, len(text))
+                removed -= cut + (1 if cut == len(text) and removed > cut else 0)  # "\n" joiner
+                b = {**b, "text": text[cut:]}
+            blocks.append(b)
+        out[i]["content"] = blocks
+        break
     return out
 
 
