@@ -199,6 +199,9 @@ class RoutingDecision:
     # non-text capabilities the whole conversation needs ("" text is implicit); dispatch
     # excludes any backend that cannot serve them.
     required_capabilities: frozenset[str] = frozenset()
+    # name of the [clients] rule that chose `backend` (UA match), if any — set instead of
+    # running the classifier; the log/explain show `client:<rule>` rather than pinned/skipped.
+    client_rule: str | None = None
 
 
 def _last_user_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -241,6 +244,7 @@ async def decide_route(
     session_id: str | None = None,       # x-session-id header / session_id body field
     multimodal_override: bool | None = None,  # /v1/messages supplies Anthropic-aware detection
     required_override: frozenset[str] | None = None,  # /v1/messages detects on the RAW body (openai_view neutralizes tool_result blocks)
+    client_user_agent: str | None = None,  # the request's User-Agent header, for [clients] rules
 ) -> RoutingDecision:
     request_id = str(uuid.uuid4())
 
@@ -288,6 +292,28 @@ async def decide_route(
         caches.conversations.get(conv_key) if conv_key else None
     )
     prev_backend = conv_entry.backend if conv_entry is not None else None
+
+    # [clients] rules: a client that identifies itself (Claude Code's `claude-cli/…` UA) is sent
+    # to a fixed backend — typically a local pool — with no classifier. This is a fallback, not a
+    # pin: a `!`/`@` prefix or a `saint-<backend>` model field already set `pinned` and wins. A
+    # matched client's MULTIMODAL turn also goes to the rule backend (capabilities are enforced at
+    # dispatch, not by widening to multimodal_backend here).
+    if pinned is None and client_user_agent:
+        ua = client_user_agent.lower()
+        rule = next((r for r in cfg.clients
+                     if r.user_agent and ua.startswith(r.user_agent.lower())
+                     and r.backend in cfg.backends), None)
+        if rule is not None:
+            return RoutingDecision(
+                request_id=request_id, mode=mode, backend=rule.backend,
+                pinned_backend=None, urgency=urgency, parsed=parsed,
+                classifier_outcome=None, classifier_result=None,
+                multimodal=multimodal, model_field=model_field,
+                last_user_content_original=last_text_original,
+                stripped_last_user=parsed.stripped if last_text_original is not None else None,
+                conversation_key=conv_key, prev_backend=prev_backend,
+                required_capabilities=required, client_rule=rule.name,
+            )
 
     if multimodal and pinned is None:
         return RoutingDecision(

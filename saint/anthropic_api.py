@@ -205,9 +205,9 @@ class SseUsageTracker:
                 self._bump("output_tokens", (d.get("usage") or {}).get("output_tokens"))
 
 
-def anthropic_error(status: int, err_type: str, message: str):
+def anthropic_error(status: int, err_type: str, message: str, headers: dict | None = None):
     from fastapi.responses import JSONResponse
-    return JSONResponse(status_code=status, content={
+    return JSONResponse(status_code=status, headers=headers, content={
         "type": "error", "error": {"type": err_type, "message": message}})
 
 
