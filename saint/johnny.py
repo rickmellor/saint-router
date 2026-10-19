@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
+from saint.capabilities import parse_capabilities
 from saint.config import JohnnyConfig
 
 
@@ -31,12 +32,14 @@ class Resolution:
     state: str  # ready | loading | absent | failed
     eta_s: float | None
     queue_depth: int | None
+    capabilities: frozenset[str] | None = None  # what the live seat serves; None = johnny didn't say
 
 
 def _parse(d: dict) -> Resolution:
     return Resolution(
         seat=d.get("seat"), endpoint=d.get("endpoint"), model=d.get("model"),
         state=d.get("state", "absent"), eta_s=d.get("eta_s"), queue_depth=d.get("queue_depth"),
+        capabilities=parse_capabilities(d.get("capabilities")),
     )
 
 

@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from saint.binding import resolve_for_dispatch
+from saint.capabilities import required_capabilities
 from saint.config import Config
 from saint.explain import format_decision
 from saint.johnny import build_resolver, provide_telemetry
@@ -39,6 +40,22 @@ def _billing_response(error_kind, anthropic: bool = False):
     else:
         body = {"error": {"message": f"SAINT: cloud provider billing/auth error - {msg}", "type": "billing_error", "code": "insufficient_credits"}}
     return JSONResponse(status_code=402, content=body, headers=headers)
+
+
+def _is_capability(error_kind) -> bool:
+    return bool(error_kind) and str(error_kind).startswith("CapabilityError")
+
+
+def _capability_response(error_kind, anthropic: bool = False):
+    """400: no backend SAINT can reach serves a modality this turn carries. Retrying cannot
+    help (the deployment is the limit), so this is the client's request to resolve — a
+    different model/pin, or dropping the attachment — not a router outage."""
+    msg = str(error_kind).split(":", 1)[1].strip() if ":" in str(error_kind) else str(error_kind)
+    if anthropic:
+        from saint.anthropic_api import anthropic_error
+        return anthropic_error(400, "invalid_request_error", msg)
+    return JSONResponse(status_code=400, content={"error": {
+        "message": msg, "type": "invalid_request_error", "code": "capability_unavailable"}})
 
 # Chat-completion kwargs we forward to the destination backend, beyond
 # `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
@@ -450,9 +467,13 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         groups: dict[str, dict[str, Any]] = {}
         for name, b in local.items():
             ep, state = _endpoint(b)
+            res = resolved.get(b.johnny_target) if (b.johnny_bound and resolver) else None
             key = _norm(ep) or f"<{name}>"
             g = groups.setdefault(key, {"endpoint": _norm(ep), "backends": [], "state": state})
             g["backends"].append(name)
+            if res is not None and res.capabilities is not None \
+                    and rank.get(state, 0) >= rank.get(g["state"], 0):
+                g["capabilities"] = sorted(res.capabilities)   # what this seat can actually serve
             if rank.get(state, 0) > rank.get(g["state"], 0):   # a live-ready binding wins the group
                 g["state"] = state
         results = await _aio.gather(*(_aio.to_thread(_seat_health, g["endpoint"]) for g in groups.values()))
@@ -650,7 +671,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             return _explain_response(text, model_field)
 
         breaker = app.state.breaker
-        candidates = dispatch_candidates(cfg, decision.backend, breaker)
+        candidates = dispatch_candidates(cfg, decision.backend, breaker,
+                                         required=decision.required_capabilities,
+                                         pinned=decision.pinned_backend is not None)
 
         def _provide(eff, latency_ms, ttft_ms, tokens_in, tokens_out, success):
             # Provide telemetry only when the johnny seat actually served the request.
@@ -693,6 +716,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 cfg=cfg, candidates=candidates, rid=rid,
                 resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
                 bedrock_state=app.state.bedrock_state,
+                required=decision.required_capabilities,
             )
 
             if result is None:
@@ -704,6 +728,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     prompt_storage_mode=cfg.logging.prompt_storage,
                 ))
                 if _is_billing(error_kind): return _billing_response(error_kind)
+                if _is_capability(error_kind): return _capability_response(error_kind)
                 raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
 
             upstream, first_chunk = result.value
@@ -787,6 +812,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             cfg=cfg, candidates=candidates, rid=rid,
             resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
             bedrock_state=app.state.bedrock_state,
+            required=decision.required_capabilities,
         )
         success = result is not None
         served = result.backend if result else None
@@ -823,6 +849,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
         if not success:
             if _is_billing(error_kind): return _billing_response(error_kind)
+            if _is_capability(error_kind): return _capability_response(error_kind)
             raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
         payload = response if isinstance(response, dict) else response.model_dump()
         return JSONResponse(content=payload,
@@ -866,6 +893,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 messages=openai_view(body),
                 caches=app.state.route_caches, session_id=session_id,
                 multimodal_override=detect_multimodal(body.get("messages", [])),
+                # openai_view neutralizes tool_result blocks, so an image riding back inside a
+                # tool result would go undetected — capabilities come from the RAW body.
+                required_override=required_capabilities(body.get("messages", [])),
             )
         except UnknownPrefixError as e:
             return anthropic_error(400, "invalid_request_error", str(e))
@@ -883,7 +913,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             })
 
         breaker = app.state.breaker
-        candidates = dispatch_candidates(cfg, decision.backend, breaker)
+        candidates = dispatch_candidates(cfg, decision.backend, breaker,
+                                         required=decision.required_capabilities,
+                                         pinned=decision.pinned_backend is not None)
         params = build_dispatch_params(body)
         if decision.parsed.raw:  # strip !/@ routing prefixes before the backend sees them
             params["messages"] = strip_prefix_from_messages(params["messages"],
@@ -974,6 +1006,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 cfg=cfg, candidates=candidates, rid=rid,
                 resolver=app.state.resolver, breaker=breaker, attempt=_attempt_stream,
                 bedrock_state=app.state.bedrock_state,
+                required=decision.required_capabilities,
             )
             if result is None:
                 _log_messages_row(served=None, eff=last_eff,
@@ -981,6 +1014,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                   success=False, error_kind=error_kind, usage={},
                                   backend_override=None)
                 if _is_billing(error_kind): return _billing_response(error_kind, anthropic=True)
+                if _is_capability(error_kind): return _capability_response(error_kind, anthropic=True)
                 return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
             upstream, first_chunk = result.value
@@ -1046,6 +1080,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             cfg=cfg, candidates=candidates, rid=rid,
             resolver=app.state.resolver, breaker=breaker, attempt=_attempt,
             bedrock_state=app.state.bedrock_state,
+            required=decision.required_capabilities,
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -1054,6 +1089,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                               success=False, error_kind=error_kind, usage={},
                               backend_override=None)
             if _is_billing(error_kind): return _billing_response(error_kind, anthropic=True)
+            if _is_capability(error_kind): return _capability_response(error_kind, anthropic=True)
             return anthropic_error(502, "api_error", f"backend error: {error_kind}")
 
         usage = anthropic_usage(result.value)

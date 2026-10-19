@@ -15,6 +15,7 @@ from saint.classifier import (
     classify_with_fallback,
     load_prompt_template,
 )
+from saint.capabilities import required_capabilities
 from saint.config import BackendConfig, Config
 from saint.policy import resolve_policy
 from saint.prefixes import ParsedPrefixes, parse_prefixes
@@ -195,6 +196,9 @@ class RoutingDecision:
     stripped_last_user: str | None
     conversation_key: str | None = None      # affinity key (for served-backend refresh + thinking guard)
     prev_backend: str | None = None          # backend that served this conversation's previous turn
+    # non-text capabilities the whole conversation needs ("" text is implicit); dispatch
+    # excludes any backend that cannot serve them.
+    required_capabilities: frozenset[str] = frozenset()
 
 
 def _last_user_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -236,10 +240,13 @@ async def decide_route(
     caches: RouteCaches | None = None,   # server passes app.state.route_caches; CLI passes nothing
     session_id: str | None = None,       # x-session-id header / session_id body field
     multimodal_override: bool | None = None,  # /v1/messages supplies Anthropic-aware detection
+    required_override: frozenset[str] | None = None,  # /v1/messages detects on the RAW body (openai_view neutralizes tool_result blocks)
 ) -> RoutingDecision:
     request_id = str(uuid.uuid4())
 
     mode: Literal["dispatch", "explain"] = "explain" if model_field == SAINT_EXPLAIN else "dispatch"
+    required = (required_override if required_override is not None
+                else required_capabilities(messages))
 
     last_user = _last_user_message(messages)
     multimodal = (multimodal_override if multimodal_override is not None
@@ -292,6 +299,7 @@ async def decide_route(
             last_user_content_original=last_text_original,
             stripped_last_user=parsed.stripped if full_text is not None else None,
             conversation_key=conv_key, prev_backend=prev_backend,
+            required_capabilities=required,
         )
 
     if pinned is not None:
@@ -303,6 +311,7 @@ async def decide_route(
             last_user_content_original=last_text_original,
             stripped_last_user=parsed.stripped if last_text_original is not None else None,
             conversation_key=conv_key, prev_backend=prev_backend,
+            required_capabilities=required,
         )
 
     clf_input = (
@@ -330,6 +339,7 @@ async def decide_route(
             last_user_content_original=last_text_original,
             stripped_last_user=parsed.stripped if full_text is not None else None,
             conversation_key=conv_key, prev_backend=prev_backend,
+            required_capabilities=required,
         )
 
     # (a) empty input (incl. injection-only after ignore_after) inherits when it can;
@@ -379,6 +389,7 @@ async def decide_route(
         last_user_content_original=last_text_original,
         stripped_last_user=parsed.stripped,
         conversation_key=conv_key, prev_backend=prev_backend,
+        required_capabilities=required,
     )
 
 

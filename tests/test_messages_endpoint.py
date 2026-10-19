@@ -131,7 +131,13 @@ def test_messages_tool_result_turn_is_not_multimodal(tmp_path):
 
 def test_messages_image_block_routes_multimodal(tmp_path):
     cfg = _cfg()
-    cfg = replace(cfg, routing=replace(cfg.routing, multimodal_backend="local-small"))
+    # capability-aware routing (2026-10-20): the multimodal seat must be able to serve the
+    # turn, so the seat this routes images to declares vision (an undeclared backend counts
+    # as text-only and dispatch skips it rather than 400ing at the seat).
+    backends = dict(cfg.backends)
+    backends["local-small"] = replace(backends["local-small"], capabilities=("vision",))
+    cfg = replace(cfg, backends=backends,
+                  routing=replace(cfg.routing, multimodal_backend="local-small"))
     app, client = _app(tmp_path, cfg)
     acreate = AsyncMock(return_value=_ANTHROPIC_OK)
     with patch("saint.backends.litellm.anthropic.messages.acreate", acreate):

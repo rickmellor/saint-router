@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from saint.capabilities import KNOWN_CAPABILITIES
+
 PromptStorageMode = Literal["full", "hashed", "none"]
 Urgency = Literal["normal", "urgent", "patient"]
+
+
+class ConfigError(ValueError):
+    """A config value that cannot be interpreted at all (as opposed to a validation finding,
+    which is collected and reported in one go). Subclasses ValueError so existing callers that
+    catch ValueError keep working."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,10 @@ class BackendConfig:
     gpus: int | None = None             # GPUs this seat occupies (else [energy] seat_gpus)
     watts: float | None = None          # measured draw at load, W (overrides gpus x gpu_watts + host share)
     tok_s: float | None = None          # benchmarked aggregate decode tok/s (johnny bench); overrides the log-measured p75
+    # non-text capabilities this backend can serve ("vision", "audio", "document"; "text" is
+    # implicit). Static declaration — a johnny seat's live capabilities (from `johnny resolve`)
+    # override it while the seat is ready. See saint/capabilities.py.
+    capabilities: tuple[str, ...] = ()
 
     @property
     def johnny_bound(self) -> bool:
@@ -66,6 +79,10 @@ class BackendConfig:
     @property
     def johnny_target(self) -> str | None:
         return self.johnny_role or self.johnny_seat
+
+    @property
+    def static_capabilities(self) -> frozenset[str]:
+        return frozenset(self.capabilities)
 
 
 @dataclass(frozen=True)
@@ -199,6 +216,30 @@ class Config:
 
 def _expand(value: str) -> str:
     return os.path.expandvars(os.path.expanduser(value))
+
+
+# An unknown capability name is almost always a typo, but rejecting it would break a seat
+# that genuinely serves a modality SAINT hasn't heard of yet — so warn (once per name) and
+# keep it.
+_WARNED_CAPS: set[str] = set()
+
+
+def _read_capabilities(backend: str, provider: str | None, raw: dict) -> tuple[str, ...]:
+    """`capabilities` from a [backends.X] table: an explicit list of strings, or the provider
+    default when absent (Claude models accept images and documents natively)."""
+    if "capabilities" not in raw:
+        return ("vision", "document") if provider in ("anthropic", "bedrock") else ()
+    value = raw["capabilities"]
+    if not isinstance(value, list):
+        raise ConfigError(f"backend '{backend}' capabilities must be a list of strings")
+    for cap in value:
+        if (isinstance(cap, str) and cap not in KNOWN_CAPABILITIES and cap != "text"
+                and cap not in _WARNED_CAPS):
+            _WARNED_CAPS.add(cap)
+            print(f"[saint] backend '{backend}' declares unknown capability '{cap}' "
+                  f"(known: {', '.join(sorted(KNOWN_CAPABILITIES))}) — keeping it",
+                  file=sys.stderr)
+    return tuple(str(cap) for cap in value)
 
 
 DOMAINS = ("code", "general")
@@ -415,6 +456,7 @@ def _auto_cloud_backends(existing: dict[str, BackendConfig]) -> dict[str, Backen
                 aliases=aliases, timeout_s=120,
                 on_error=("local-chat" if "local-chat" in existing else None),
                 price_in=pin, price_out=pout, context=ctx,
+                capabilities=("vision", "document"),
             )
     return out
 
@@ -438,6 +480,7 @@ def load_config(path: Path) -> Config:
         backends[name] = BackendConfig(
             name=name,
             provider=b.get("provider"),  # optional only for johnny_only (validated below)
+            capabilities=_read_capabilities(name, b.get("provider"), b),
             model=b.get("model"),
             api_key_env=b.get("api_key_env"),
             api_key=b.get("api_key"),

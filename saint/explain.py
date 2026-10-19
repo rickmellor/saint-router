@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from saint.capabilities import missing
 from saint.config import Config
 from saint.router import RoutingDecision
 
@@ -14,6 +15,7 @@ def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> st
 
     lines.append(f"Prefixes parsed:    {decision.parsed.raw or '(none)'}")
     lines.append(f"Effective urgency:  {decision.urgency}")
+    lines.append(f"Required caps:      {', '.join(sorted(decision.required_capabilities)) or '(none)'}")
 
     if decision.pinned_backend:
         lines.append(f"Pinned backend:     {decision.pinned_backend} (classifier skipped)")
@@ -58,6 +60,13 @@ def format_decision(decision: RoutingDecision, cfg: Config, resolver=None) -> st
         if d:
             lines.append("")
             lines.append(f"johnny seat:        {d.get('seat') or '(none)'} [{d['state']}]")
+            caps = frozenset(d.get("capabilities") or ())
+            if caps:
+                lines.append(f"Seat capabilities:  {', '.join(sorted(caps))}")
+            lacking = missing(decision.required_capabilities, caps)
+            if lacking:
+                lines.append(f"  !! this backend lacks: {','.join(sorted(lacking))} "
+                             f"— dispatch will skip it")
             if d.get("eta_s") is not None:
                 lines.append(f"  eta_s:            {d['eta_s']}")
             if d["state"] == "ready":

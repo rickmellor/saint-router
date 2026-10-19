@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from saint.binding import Effective, resolve_for_dispatch
+from saint.capabilities import missing
 from saint.config import Config
 from saint.route_cache import Breaker
 from saint.sso import ensure_sso_valid, is_auth_failure, spawn_sso_login
@@ -36,15 +37,33 @@ class BedrockRuntime:
     spawned_profiles: set[str] = field(default_factory=set)  # one browser tab per expiry event
 
 
-def dispatch_candidates(cfg: Config, primary: str, breaker: Breaker) -> list[str]:
+def dispatch_candidates(cfg: Config, primary: str, breaker: Breaker,
+                        required: frozenset[str] = frozenset(),
+                        pinned: bool = False) -> list[str]:
     """Primary plus its one-hop on_error fallback. The fallback's own on_error is never
-    followed (loop-proof). An open breaker skips the primary when a fallback exists."""
+    followed (loop-proof). An open breaker skips the primary when a fallback exists.
+
+    A turn carrying non-text content also queues every OTHER backend that could plausibly
+    serve it (live johnny caps are decided at resolve time, so any bound backend is a
+    candidate; otherwise the static declaration must cover `required`) — otherwise an image
+    routed to a text-only seat would 400 instead of reaching the vision seat. A pin is a pin:
+    the user named the backend, so we keep the short list and let it fail loudly."""
     fb = cfg.backends[primary].on_error
     candidates = [primary] + ([fb] if fb and fb != primary else [])
     if len(candidates) > 1 and breaker.is_open(primary):
         print(f"[router] breaker open on '{primary}' — dispatching straight to '{fb}'",
               flush=True)
-        return candidates[1:]
+        candidates = candidates[1:]
+    if required and not pinned:
+        bound, static = [], []
+        for name, b in cfg.backends.items():
+            if name in candidates:
+                continue
+            if b.johnny_bound:
+                bound.append(name)          # live seat: resolve decides capability
+            elif required <= b.static_capabilities:
+                static.append(name)
+        candidates += bound + static        # a live seat beats a declared one; no duplicates
     return candidates
 
 
@@ -68,12 +87,19 @@ async def run_candidates(
     breaker: Breaker,
     attempt: Callable[[Effective], Awaitable[Any]],
     bedrock_state: BedrockRuntime | None = None,
+    required: frozenset[str] = frozenset(),
 ) -> tuple[Served | None, str | None, Effective | None]:
     """Try candidates in order; return (served, last_error_kind, last_effective).
 
     `attempt(eff)` performs one dispatch try and raises on failure. Success anywhere
     short-circuits. `last_effective` is returned for logging fidelity when everything
     failed (the log row records the last backend we tried).
+
+    A candidate whose resolved seat cannot serve `required` is skipped WITHOUT attempting it
+    and without touching the breaker — the request is malformed for that backend, not the
+    backend unhealthy, and burning it would blackhole a live text-only seat on every image.
+    If nothing could be attempted at all, the failure is a CapabilityError (an unfulfillable
+    request → 400 upstream, not a 502).
 
     Bedrock auth handling: a classified credential failure force-opens the breaker with
     the (longer) auth cooldown, skips the pointless same-backend retry, and spawns the
@@ -82,6 +108,8 @@ async def run_candidates(
     session never burns a real request."""
     error_kind: str | None = None
     eff: Effective | None = None
+    skipped: list[tuple[str, str, frozenset[str]]] = []   # (backend, model, caps it lacks)
+    attempted = False
     for cand in candidates:
         backend_cfg = cfg.backends[cand]
         is_bedrock = backend_cfg.provider == "bedrock"
@@ -101,8 +129,15 @@ async def run_candidates(
             if bedrock_state is not None:
                 bedrock_state.spawned_profiles.discard(profile)  # next expiry may re-prompt
 
-        eff = resolve_for_dispatch(cfg, cand, resolver)
+        eff = resolve_for_dispatch(cfg, cand, resolver, required)
+        miss = missing(required, eff.capabilities)
+        if miss:
+            print(f"[router] req#{rid}: skipping '{cand}' ({eff.backend.model}): "
+                  f"lacks {','.join(sorted(miss))}", file=sys.stderr, flush=True)
+            skipped.append((cand, eff.backend.model, miss))
+            continue
         attempts = 2 if cfg.routing.retry_same_backend else 1
+        attempted = True
         for i in range(attempts):
             try:
                 value = await attempt(eff)
@@ -140,4 +175,11 @@ async def run_candidates(
                 print(f"[router] req#{rid}: dispatch to '{cand}' failed "
                       f"({error_kind}: {detail}) — {'retrying' if i == 0 and attempts == 2 else 'moving on'}",
                       file=sys.stderr, flush=True)
+    if skipped and not attempted:
+        # nothing was even tryable: the turn needs a modality no candidate serves. That is a
+        # request the deployment cannot answer (400), not a backend outage (502).
+        error_kind = ("CapabilityError: no backend can serve "
+                      + ",".join(sorted(required))
+                      + " (" + "; ".join(f"{c}/{m} lacks {','.join(sorted(x))}"
+                                         for c, m, x in skipped) + ")")
     return None, error_kind, eff
