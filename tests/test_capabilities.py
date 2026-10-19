@@ -358,12 +358,12 @@ base_url = "http://127.0.0.1:8011/v1"
 
 def test_config_anthropic_defaults_to_vision_document(tmp_path):
     cfg = load_config(_toml(tmp_path, """
-[backends.claude]
+[backends.cloud-haiku]
 provider = "anthropic"
 model = "claude-x"
 api_key_env = "ANTHROPIC_API_KEY"
 """))
-    assert cfg.backends["claude"].static_capabilities == frozenset({"vision", "document"})
+    assert cfg.backends["cloud-haiku"].static_capabilities == frozenset({"vision", "document"})
 
 
 def test_config_bedrock_defaults_to_vision_document(tmp_path):
@@ -379,13 +379,13 @@ aws_region = "us-east-1"
 def test_config_explicit_empty_list_overrides_the_provider_default(tmp_path):
     """Present-but-empty is a declaration ("text only"), distinct from absent."""
     cfg = load_config(_toml(tmp_path, """
-[backends.claude]
+[backends.cloud-haiku]
 provider = "anthropic"
 model = "claude-x"
 api_key_env = "ANTHROPIC_API_KEY"
 capabilities = []
 """))
-    assert cfg.backends["claude"].static_capabilities == frozenset()
+    assert cfg.backends["cloud-haiku"].static_capabilities == frozenset()
 
 
 def test_config_capabilities_non_list_is_a_config_error(tmp_path):
