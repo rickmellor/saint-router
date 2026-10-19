@@ -74,6 +74,20 @@ def _pool_response(error_kind, anthropic: bool = False):
     return JSONResponse(status_code=503, headers={"retry-after": "5"}, content={"error": {
         "message": msg, "type": "server_error", "code": "no_local_seat"}})
 
+def _note_pool_member(caches, decision, eff) -> None:
+    """Chat-completions surface: record which POOL MEMBER served this conversation so a sticky
+    pool keeps it there next turn (the Messages surface does this in _refresh_affinity). Only
+    pool dispatches write here — the classified path's affinity entry is written by decide_route."""
+    member = getattr(eff, "pool_member", None)
+    key = getattr(decision, "conversation_key", None)
+    if not member or not key or caches is None or caches.conversations is None:
+        return
+    from dataclasses import replace as _replace
+    from saint.route_cache import ConversationEntry
+    entry = caches.conversations.get(key)
+    caches.conversations.set(key, _replace(entry, backend=member) if entry is not None
+                             else ConversationEntry(backend=member))
+
 # Chat-completion kwargs we forward to the destination backend, beyond
 # `model`/`messages`/`stream`/`tools`/`tool_choice` (which are handled explicitly).
 # Anything not in this list is silently dropped. Add to v1.x as needed.
@@ -765,6 +779,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             upstream, first_chunk = result.value
             first_chunk_ts = time.monotonic() if first_chunk is not None else None
             eff_final, served_final = result.eff, result.backend
+            _note_pool_member(app.state.route_caches, decision, eff_final)
 
             async def gen():
                 tokens_in_total = 0
@@ -850,6 +865,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         served = result.backend if result else None
         eff = result.eff if result else last_eff
         response = result.value if result else None
+        if success:
+            _note_pool_member(app.state.route_caches, decision, eff)
 
         backend_latency_ms = int((time.monotonic() - started) * 1000)
 
