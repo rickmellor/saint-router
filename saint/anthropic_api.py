@@ -167,6 +167,9 @@ class SseUsageTracker:
       - message_start: data.message.usage — input_tokens, cache_creation_input_tokens,
         cache_read_input_tokens (and an initial output_tokens)
       - message_delta: data.usage.output_tokens — cumulative; take the max
+    litellm's messages→completion bridge (every vLLM seat) sends zeros in message_start and the
+    real input_tokens in message_delta, so input/cache counts are taken from both (max): before
+    2026-10-20 local /v1/messages rows logged tokens_in = 0.
     Parsing failures must never kill the relay — this is accounting, not correctness."""
 
     def __init__(self):
@@ -202,7 +205,10 @@ class SseUsageTracker:
                           "cache_read_input_tokens", "output_tokens"):
                     self._bump(k, u.get(k))
             elif t == "message_delta":
-                self._bump("output_tokens", (d.get("usage") or {}).get("output_tokens"))
+                u = d.get("usage") or {}
+                for k in ("input_tokens", "cache_creation_input_tokens",
+                          "cache_read_input_tokens", "output_tokens"):
+                    self._bump(k, u.get(k))
 
 
 def anthropic_error(status: int, err_type: str, message: str, headers: dict | None = None):
