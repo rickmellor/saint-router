@@ -154,10 +154,11 @@ def test_clear_requests_empty_db(tmp_path):
 
 def test_schema_v3_fresh_and_upgrade(tmp_path):
     from saint.storage import SCHEMA_VERSION
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     conn = open_db(tmp_path / "fresh.sqlite")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
     assert {"cache_read_tokens", "cache_write_tokens", "spilled_from", "spilled_to", "seat_load"} <= cols
+    assert {"client", "origin", "session", "job_id"} <= cols   # migration 0005 (hybrid-usage/1)
 
     # v2 database with a row upgrades in place, data intact
     import sqlite3
@@ -172,7 +173,7 @@ def test_schema_v3_fresh_and_upgrade(tmp_path):
     old.commit()
     old.close()
     conn2 = open_db(tmp_path / "old.sqlite")
-    assert schema_version(conn2) == 4
+    assert schema_version(conn2) == SCHEMA_VERSION
     assert conn2.execute("SELECT COUNT(*) FROM requests").fetchone() == (1,)
 
 

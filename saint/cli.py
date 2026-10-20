@@ -265,6 +265,33 @@ def savings(
 
 
 
+@app.command("usage")
+def usage(
+    from_day: str | None = typer.Option(None, "--from", help="Inclusive start date, YYYY-MM-DD UTC (default: --to minus 29 days)."),
+    to_day: str | None = typer.Option(None, "--to", help="Inclusive end date, YYYY-MM-DD UTC (default: today)."),
+    granularity: str = typer.Option("day", "--granularity", help="day | total."),
+    client: str | None = typer.Option(None, "--client", help="Comma-separated client labels to keep."),
+    origin: str | None = typer.Option(None, "--origin", help="Comma-separated X-Inference-Origin values to keep."),
+    session: str | None = typer.Option(None, "--session", help="Comma-separated X-Inference-Session values to keep."),
+    config: Path | None = typer.Option(None),
+):
+    """Print the `hybrid-usage/1` report straight from the local request log — the same JSON
+    `GET /usage/v1` serves, no server needed (docs/usage-api.md)."""
+    import json as _json
+
+    from saint import usage as _usage
+    from saint.storage import open_db
+
+    cfg = _load_or_die(config)
+    params = {"from": from_day, "to": to_day, "granularity": granularity,
+              "client": client, "origin": origin, "session": session}
+    status, body = _usage.query(open_db(Path(cfg.logging.db_path)), cfg,
+                                {k: v for k, v in params.items() if v is not None})
+    print(_json.dumps(body, indent=2))
+    if status != 200:
+        raise typer.Exit(2)
+
+
 @app.command("drain")
 def drain(
     seats: list[str] = typer.Argument(None, help="Seat names, ports or johnny roles to drain (omit with --list)."),

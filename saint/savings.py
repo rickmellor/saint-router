@@ -84,6 +84,48 @@ def _eff_cache_prices(b):
     return cr, cw
 
 
+def cloud_bill(b, tokens_in: int | None, tokens_out: int | None,
+               cache_read: int | None = None, cache_write: int | None = None) -> float:
+    """What a cloud account was ACTUALLY billed for a priced backend's tokens: uncached input at
+    list price, cache reads/writes at their effective prices, output at price_out — the `real`
+    figure `compute()` reports for cloud rows. Shared with saint/usage.py's billed_cost_usd so the
+    savings report and the usage endpoint can never drift apart."""
+    crd, cwr = cache_read or 0, cache_write or 0
+    cr_p, cw_p = _eff_cache_prices(b)
+    uncached_in = max((tokens_in or 0) - crd - cwr, 0)
+    return (uncached_in * (b.price_in or 0.0) + crd * cr_p + cwr * cw_p
+            + (tokens_out or 0) * (b.price_out or 0.0)) / 1e6
+
+
+def local_tok_s(cfg, b, name: str, rates: dict[str, float]) -> tuple[float | None, str | None]:
+    """(tok/s, where it came from) for a local seat: the bench figure in config (`johnny bench`),
+    else the request-log p75. (None, None) when neither is known — an un-costed seat."""
+    if b is not None and b.tok_s:
+        return b.tok_s, "bench"
+    rate = rates.get(name)
+    return (rate, "log") if rate else (None, None)
+
+
+def elec_per_mtok(watts: float, tok_s: float | None, price_kwh: float) -> float | None:
+    """$/Mtok of OUTPUT for a seat drawing `watts` at `tok_s` tok/s: W x $/kWh / (tok/s x 3.6).
+    None when the decode rate is unknown — un-costed rather than fabricated, the rule both
+    `compute()` and /status follow."""
+    return watts * price_kwh / (tok_s * 3.6) if tok_s else None
+
+
+def local_elec_per_mtok(cfg, b, name: str, rates: dict[str, float]) -> float | None:
+    """One-call form for callers that only want the price (saint/usage.py's energy_cost_usd):
+    resolve the seat's decode rate and watts, then price them."""
+    tok_s, _src = local_tok_s(cfg, b, name, rates)
+    return elec_per_mtok(local_seat_watts(cfg, b), tok_s, cfg.energy.price_kwh)
+
+
+def is_local(b, name: str) -> bool:
+    """Hardware we run: johnny-bound, or named `local*` — the same test `compute()` uses, and the
+    one `saint/usage.py` reports as `billing: local`."""
+    return bool(b is not None and b.johnny_bound) or name.startswith("local")
+
+
 def is_cloud(b) -> bool:
     """A priced, non-local backend — the only kind that can be a savings counterfactual."""
     return bool(b is not None and b.price_in is not None and not b.johnny_bound and not b.name.startswith("local"))
@@ -172,24 +214,21 @@ def compute(conn, cfg, period: str = "day", baseline: str | None = None) -> dict
         if priced_as:
             notes.append(f"{name} priced as {priced_as} (renamed / alias)")
         tin, tout = r["tokens_in"], r["tokens_out"]
-        is_local = bool(b and b.johnny_bound) or name.startswith("local")
+        local = is_local(b, name)
 
-        if is_local:
-            tok_s, src = ((b.tok_s, "bench") if (b is not None and b.tok_s) else (rates.get(name), "log"))
+        if local:
+            tok_s, src = local_tok_s(cfg, b, name, rates)
             watts = local_seat_watts(cfg, b)
-            elec = (watts * en.price_kwh / (tok_s * 3.6)) if tok_s else None
+            elec = elec_per_mtok(watts, tok_s, en.price_kwh)
             actual = (tout / 1e6 * elec) if elec is not None else 0.0
             rows.append(Row(name, "local", r["requests"], tin, tout, tok_s, elec,
                             actual, (tin * base_in + tout * base_out) / 1e6 if bb else None,
                             watts=watts, tok_per_w=(tok_s / watts if (tok_s and watts) else None),
-                            source=(src if tok_s else None), priced_as=priced_as))
+                            source=src, priced_as=priced_as))
         elif b and b.price_in is not None:
             po = b.price_out or 0.0
-            crd, cwr = r["cache_read"], r["cache_write"]
-            cr_p, cw_p = _eff_cache_prices(b)
-            uncached_in = max(tin - crd - cwr, 0)
-            real = (uncached_in * b.price_in + crd * cr_p + cwr * cw_p + tout * po) / 1e6  # Anthropic bill
-            no_cache = (tin * b.price_in + tout * po) / 1e6                                # list, no caching
+            real = cloud_bill(b, tin, tout, r["cache_read"], r["cache_write"])   # the cloud bill
+            no_cache = (tin * b.price_in + tout * po) / 1e6                       # list, no caching
             rows.append(Row(name, "cloud", r["requests"], tin, tout, None, None,
                             real, (tin * base_in + tout * base_out) / 1e6 if bb else None, no_cache,
                             priced_as=priced_as))

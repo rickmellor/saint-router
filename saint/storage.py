@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -40,16 +40,26 @@ class LogRow:
     spilled_from: str | None = None        # role whose seat was saturated/not ready (migration 0004)
     spilled_to: str | None = None          # seat that served instead
     seat_load: int | None = None           # requests in flight on the serving seat at dispatch
+    # attribution for `GET /usage/v1` (migration 0005) — who caused this request. `client` is
+    # derived from User-Agent and recorded on every request; the rest come from the optional
+    # X-Inference-* headers. Never forwarded upstream, never prompt content.
+    client: str | None = None
+    origin: str | None = None
+    session: str | None = None
+    job_id: str | None = None
 
 
 def build_log_row(decision, *, model_field, backend_latency_ms, success, error_kind,
                   tokens_in, tokens_out, prompt_storage_mode,
                   johnny_seat=None, state_at_dispatch=None,
                   cache_read_tokens=None, cache_write_tokens=None,
-                  backend_override=None, spilled_from=None, seat_load=None) -> LogRow:
+                  backend_override=None, spilled_from=None, seat_load=None,
+                  client=None, origin=None, session=None, job_id=None) -> LogRow:
     """Map a RoutingDecision (+ dispatch outcome) to a LogRow. Dispatch-less callers
     (e.g. `saint explain`) pass backend_latency_ms/tokens as None. `backend_override`
-    is the backend that actually served when a dispatch-failure fallback hop was taken."""
+    is the backend that actually served when a dispatch-failure fallback hop was taken.
+    `client`/`origin`/`session`/`job_id` are the hybrid-usage/1 attribution values
+    (saint.usage.attribution) — pass them through on every endpoint."""
     out = decision.classifier_outcome
     return LogRow(
         request_id=decision.request_id,
@@ -80,6 +90,10 @@ def build_log_row(decision, *, model_field, backend_latency_ms, success, error_k
         spilled_from=spilled_from,
         spilled_to=johnny_seat if spilled_from else None,
         seat_load=seat_load,
+        client=client,
+        origin=origin,
+        session=session,
+        job_id=job_id,
     )
 
 
@@ -116,6 +130,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if current < 4:
         conn.executescript(_load_migration("0004_spill.sql"))
         conn.execute("PRAGMA user_version = 4")
+    if current < 5:
+        conn.executescript(_load_migration("0005_attribution.sql"))
+        conn.execute("PRAGMA user_version = 5")
 
 
 def _apply_storage_mode(content: str | None, mode: str) -> str | None:
@@ -140,7 +157,8 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             classifier_complexity, classifier_reason, backend_chosen, backend_latency_ms,
             tokens_in, tokens_out, success, error_kind, prompt_content, prompt_storage_mode,
             johnny_seat, state_at_dispatch, cache_read_tokens, cache_write_tokens,
-            spilled_from, spilled_to, seat_load
+            spilled_from, spilled_to, seat_load,
+            client, origin, session, job_id
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?,
@@ -148,7 +166,8 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
-            ?, ?, ?
+            ?, ?, ?,
+            ?, ?, ?, ?
         )
         """,
         (
@@ -163,6 +182,7 @@ def log_request(conn: sqlite3.Connection, row: LogRow) -> int:
             row.johnny_seat, row.state_at_dispatch,
             row.cache_read_tokens, row.cache_write_tokens,
             row.spilled_from, row.spilled_to, row.seat_load,
+            row.client, row.origin, row.session, row.job_id,
         ),
     )
     return int(cursor.lastrowid or 0)

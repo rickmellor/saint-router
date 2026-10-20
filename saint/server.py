@@ -23,6 +23,7 @@ from saint.backends import call_embeddings
 from saint.dispatch import BedrockRuntime, dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
 from saint.storage import LogRow, build_log_row, log_request, open_db
+from saint import usage as _usage
 
 
 
@@ -577,6 +578,24 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             return {"error": "seat required"}
         return {"draining": sorted(set_drain([seat], bool(body.get("on", True))))}
 
+    @app.get("/usage/v1")
+    async def usage_v1(request: Request) -> JSONResponse:
+        """`hybrid-usage/1` provider endpoint (docs/usage-api.md): this router's own usage —
+        tokens split four ways, per backend with who bills it — for a spend report that also reads
+        a cloud bill. Read-only aggregation of the request log; never returns prompt text. Open on
+        a trusted LAN, or gated by SAINT_USAGE_TOKEN (contract §6)."""
+        denied = _usage.auth_error(request.headers)
+        if denied is not None:
+            status, body = denied
+            return JSONResponse(status_code=status, content=body)
+        # A repeated parameter takes its FIRST value (the contract defines none as multi-valued,
+        # and dict(QueryParams) would hand back the last).
+        params: dict[str, str] = {}
+        for key, value in request.query_params.multi_items():
+            params.setdefault(key, value)
+        status, body = _usage.query(app.state.db, cfg, params)
+        return JSONResponse(status_code=status, content=body)
+
     @app.get("/status")
     async def status() -> dict[str, Any]:
         """The full 'available choices' map for clients (e.g. input): every routable backend
@@ -682,6 +701,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         # session_id (body field or x-session-id header) keys conversation affinity;
         # it is never forwarded upstream (absent from _FORWARDED_PARAMS).
         session_id = request.headers.get("x-session-id") or body.get("session_id")
+        # hybrid-usage/1 attribution: recorded on the log row, never forwarded upstream. Computed
+        # once per request — it labels the request, it does not route it.
+        attr = _usage.attribution(request.headers, cfg)
 
         # Reserved savings report — returned as the completion, no routing/LLM/cost (like
         # saint-explain). Two triggers, both a "prompt-time hint" the caller controls:
@@ -770,6 +792,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     success=False, error_kind=error_kind,
                     tokens_in=None, tokens_out=None,
                     prompt_storage_mode=cfg.logging.prompt_storage,
+                    **attr,
                 ))
                 if _is_billing(error_kind): return _billing_response(error_kind)
                 if _is_capability(error_kind): return _capability_response(error_kind)
@@ -835,6 +858,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         cache_write_tokens=cache_write_total or None,
                         backend_override=served_final,
                         spilled_from=getattr(eff_final, "spilled_from", None), seat_load=getattr(eff_final, "seat_load", None),
+                        **attr,
                     ))
                     _provide(eff_final, elapsed_ms, ttft_ms, tokens_in_total or None,
                              tokens_out_total or None, success_local)
@@ -888,6 +912,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             cache_read_tokens=cache_read, cache_write_tokens=cache_write,
             backend_override=served,
             spilled_from=getattr(eff, "spilled_from", None), seat_load=getattr(eff, "seat_load", None),
+            **attr,
         ))
         # non-streaming: TTFT not separable -> total latency only
         if eff is not None:
@@ -920,6 +945,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         from saint.backends import call_backend_messages
 
         body = await request.json()
+        # hybrid-usage/1 attribution: recorded on the log row, never forwarded upstream.
+        attr = _usage.attribution(request.headers, cfg)
         client_model = body.get("model") or ""
         if body.get("max_tokens") is None:
             return anthropic_error(400, "invalid_request_error", "max_tokens is required")
@@ -1035,6 +1062,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 cache_write_tokens=usage.get("cache_creation_input_tokens"),
                 backend_override=backend_override,
                 spilled_from=getattr(eff, "spilled_from", None), seat_load=getattr(eff, "seat_load", None),
+                **attr,
             ))
 
         started = time.monotonic()
@@ -1228,6 +1256,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             prompt_content=None,  # embedding inputs are bulky and never training data
             prompt_storage_mode="none",
             johnny_seat=eff.johnny_seat, state_at_dispatch=eff.state_at_dispatch,
+            **_usage.attribution(request.headers, cfg),
         ))
         if not success:
             if _is_billing(error_kind): return _billing_response(error_kind)

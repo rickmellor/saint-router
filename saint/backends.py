@@ -180,16 +180,20 @@ def _resolve_model_id(b: BackendConfig) -> str:
 def _provider_kwargs(backend: BackendConfig) -> dict[str, Any]:
     """Auth/endpoint kwargs per provider. Bedrock uses the AWS credential chain
     (aws_profile → credential_process/SSO via saint.bedrock_auth's patched path),
-    never a static api_key."""
+    never a static api_key.
+
+    `extra_headers` is pinned to {} so litellm forwards NOTHING but what SAINT itself
+    sets: a client's `X-Inference-*` attribution headers (hybrid-usage/1 §1) and its
+    `User-Agent` are for SAINT's log, and MUST NOT reach an upstream model."""
     if backend.provider == "bedrock":
         kw: dict[str, Any] = {"aws_region_name": backend.aws_region}
         if backend.aws_profile:
             kw["aws_profile_name"] = backend.aws_profile
-        return kw
+        return {**kw, "extra_headers": {}}
     kw = {"api_key": _resolve_api_key(backend)}
     if backend.base_url:
         kw["api_base"] = backend.base_url
-    return kw
+    return {**kw, "extra_headers": {}}
 
 
 def _shape_request(backend: BackendConfig, kwargs: dict[str, Any]) -> dict[str, Any]:
