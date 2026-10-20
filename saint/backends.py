@@ -13,6 +13,11 @@ import litellm
 # Anthropic ladder has none), this is the catch-all.
 litellm.drop_params = True
 
+# litellm Messages-bridge fixes (reasoning+content chunks → "Content block is not a thinking block").
+from saint import litellm_patches  # noqa: E402
+
+litellm_patches.apply()
+
 import re
 
 from saint.config import BackendConfig
