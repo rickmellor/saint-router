@@ -47,7 +47,7 @@ def test_messages_pinned_passthrough_headers_and_log(tmp_path):
     assert kw["max_tokens"] == 100 and kw["system"] == "you are helpful"
     row = _row(tmp_path, "SELECT model_field, backend_chosen, tokens_in, tokens_out, "
                          "cache_write_tokens, success FROM requests ORDER BY id DESC LIMIT 1")
-    assert row == ("saint-cloud-large", "cloud-large", 40, 5, 30, 1)
+    assert row == ("saint-cloud-large", "cloud-large", 70, 5, 30, 1)  # tokens_in includes cache (40 + 30)
 
 
 def test_messages_alias_pins_and_unknown_routes_auto(tmp_path):
@@ -227,7 +227,7 @@ def test_messages_streaming_relays_bytes_and_logs_usage(tmp_path):
     assert headers["x-saint-backend"] == "cloud-large"
     row = _row(tmp_path, "SELECT tokens_in, tokens_out, cache_read_tokens, "
                          "cache_write_tokens, success FROM requests ORDER BY id DESC LIMIT 1")
-    assert row == (5000, 42, 4200, 300, 1)
+    assert row == (9500, 42, 4200, 300, 1)  # tokens_in includes cache (5000 + 4200 + 300)
 
 
 def test_messages_streaming_failover_before_first_chunk(tmp_path):

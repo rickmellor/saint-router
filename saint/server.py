@@ -1044,6 +1044,16 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         def _log_state(eff, served: str) -> str | None:
             return "dispatch_fallback" if served != decision.backend else eff.state_at_dispatch
 
+        def _inclusive_input(usage: dict) -> int | None:
+            # Anthropic's input_tokens EXCLUDES cache reads/writes; the log's tokens_in includes
+            # them (chat path, savings.cloud_bill and usage.py subtract them back out). Before
+            # 2026-10-20 messages rows logged the exclusive number, so cached requests read as 0.
+            parts = [usage.get(k) for k in ("input_tokens", "cache_read_input_tokens",
+                                             "cache_creation_input_tokens")]
+            if all(v is None for v in parts):
+                return None
+            return sum(v for v in parts if isinstance(v, int))
+
         def _log_messages_row(*, served, eff, latency_ms, success, error_kind, usage,
                               backend_override):
             _remember_decision(decision, served=served, session_id=session_id,
@@ -1053,7 +1063,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 decision=decision, model_field=client_model or "anthropic-messages",
                 backend_latency_ms=latency_ms,
                 success=success, error_kind=error_kind,
-                tokens_in=usage.get("input_tokens"),
+                tokens_in=_inclusive_input(usage),
                 tokens_out=usage.get("output_tokens"),
                 prompt_storage_mode=cfg.logging.prompt_storage,
                 johnny_seat=eff.johnny_seat if eff else None,
