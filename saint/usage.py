@@ -34,7 +34,7 @@ PROVIDER_NAME = "saint"
 PARAM_ORDER = ("from", "to", "granularity", "client", "origin", "session")
 GRANULARITIES = ("day", "total")
 DEFAULT_GRANULARITY = "day"
-DEFAULT_LOOKBACK_DAYS = 29      # `from` defaults to `to` − 29 days ⇒ a 30-day window
+DEFAULT_LOOKBACK_DAYS = 29      # `from` defaults to `to` minus 29 days => a 30-day window
 WINDOW_MAX_DAYS = 366           # a longer window is a 400
 HEADER_MAX_LEN = 128            # contract §1: longer values are truncated, not rejected
 TOKEN_ENV_VAR = "SAINT_USAGE_TOKEN"   # unset/empty ⇒ the endpoint is open (contract §6)
@@ -161,7 +161,7 @@ def _parse(params: dict[str, str]) -> dict:
 
     # `is not None` throughout: a present-but-empty parameter is a value the client sent, and
     # every one of them is INVALID_PARAM when empty — never silently the default.
-    to = _date_param(params["to"], "to") if params.get("to") is not None else datetime.now(UTC).date()
+    to = _date_param(params["to"], "to") if params.get("to") is not None else _today()
     frm = (_date_param(params["from"], "from") if params.get("from") is not None
            else to - timedelta(days=DEFAULT_LOOKBACK_DAYS))
     if frm > to:
@@ -234,6 +234,9 @@ def _sorted_entries(bucket: dict) -> list:
 def _today() -> date:
     """Today, UTC. A seam so `to`'s default and PARTIAL_PERIOD are testable without a clock."""
     return datetime.now(UTC).date()
+
+
+def _iso(ts: str | None) -> str | None:
     """A logged ts (ISO-8601 +00:00) as the contract's Z-suffixed UTC stamp."""
     if not ts:
         return None
@@ -361,13 +364,12 @@ def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
     }
     if win["granularity"] == "day":
         body["by_day"] = [{"day": day, **_money_entry(agg)} for day, agg in sorted(by_day.items())]
-    body["by_backend"] = [
-        {"backend": name, "billing": billing,
-         "model": getattr(b, "model", None),      # the config model; null for an unknown backend
-         **_money_entry(agg)}
-        for (name, agg), (billing, b) in
-        ((kv, billing_for(cfg, kv[0], resolve)) for kv in sorted(
-            by_backend.items(), key=lambda kv: (-kv[1]["requests"], kv[0])))]
+    body["by_backend"] = []
+    for name, agg in sorted(by_backend.items(), key=lambda kv: (-kv[1]["requests"], kv[0])):
+        billing, b = billing_for(cfg, name, resolve)      # cached, so this is not a second lookup
+        body["by_backend"].append({"backend": name, "billing": billing,
+                                   # the config model; null for a backend SAINT can't resolve
+                                   "model": getattr(b, "model", None), **_money_entry(agg)})
     body["by_client"] = [{"client": key, **_entry(agg)} for key, agg in _sorted_entries(by_client)]
     body["by_origin"] = [{"origin": key, **_entry(agg)} for key, agg in _sorted_entries(by_origin)]
     body["notes"] = _notes(win, rows, first_attr, local_rows, local_priced)
@@ -377,7 +379,7 @@ def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
 def _notes(win: dict, rows: list, first_attr: str | None, local_rows: int,
            local_priced: int) -> list[dict]:
     notes: list[dict] = []
-    if win["to"] >= datetime.now(UTC).date():
+    if win["to"] >= _today():
         notes.append({"code": "PARTIAL_PERIOD",
                       "text": "the window includes today, which is still accumulating"})
     if local_rows and not local_priced:

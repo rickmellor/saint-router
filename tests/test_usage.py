@@ -24,8 +24,7 @@ from saint.config import (
     RoutingConfig,
     ServerConfig,
 )
-from saint.server import build_app
-from saint.storage import SCHEMA_VERSION, build_log_row, log_request, open_db, schema_version
+from saint.storage import SCHEMA_VERSION, build_log_row, open_db, schema_version
 
 # ------------------------------------------------------------------ fixtures
 
@@ -41,7 +40,7 @@ def _cfg() -> Config:
     """Local seats (one with a bench tok/s, one without), one backend per billing family, and a
     cloud tier with no prices. [energy] and the seat watts are pinned so money is exact."""
     def openai(name, **kw):
-        base = dict(provider="openai", model=f"{name}-model", api_key=None,
+        base = dict(provider="openai", model=f"{name}-model", api_key_env=None, api_key=None,
                     base_url="http://x/v1", aliases=(), timeout_s=60)
         base.update(kw)
         return BackendConfig(name=name, **base)
@@ -96,8 +95,8 @@ def _insert(conn, *, ts, backend="local-coder", model_field="saint-auto", tokens
          1 if success else 0, client, origin, session, job_id))
 
 
-def _db(tmp_path):
-    conn = open_db(tmp_path / "log.sqlite")
+def _db(tmp_path, name="log.sqlite"):
+    conn = open_db(tmp_path / name)
     return conn
 
 
@@ -383,14 +382,26 @@ def test_by_day_and_granularity_total(tmp_path):
 def test_breakdowns_group_and_sort(tmp_path):
     conn = _db(tmp_path)
     _insert(conn, ts=_ts(1), client="claude-code", origin="GEN-A", tokens_out=10)
+    _insert(conn, ts=_ts(1), client="claude-code", origin="GEN-A", tokens_out=10)
     _insert(conn, ts=_ts(1), client="pi", origin="GEN-A", tokens_out=20)
     _insert(conn, ts=_ts(2), client="pi", tokens_out=30)      # no origin -> its own entry
     body = _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
-    assert [c["client"] for c in body["by_client"]] == ["claude-code", "pi"]   # requests desc
-    assert body["by_client"][1]["total_tokens"] == 50
-    assert body["by_client"][1]["tokens_by_type"]["output"] == 50
+    # requests descending, then label ascending: claude-code has 2 rows, pi has 2 — so the tie
+    # breaks alphabetically. (Equal request counts are the tie the tie-breaker exists for.)
+    assert [c["client"] for c in body["by_client"]] == ["claude-code", "pi"]
+    assert body["by_client"][0]["requests"] == body["by_client"][1]["requests"] == 2
+    assert body["by_client"][1]["tokens_by_type"]["output"] == 50          # pi: 20 + 30
+    assert body["by_client"][1]["total_tokens"] == 250                     # + 2x100 uncached input
     origins = {o["origin"]: o for o in body["by_origin"]}
-    assert origins[None]["requests"] == 1 and origins["GEN-A"]["requests"] == 2
+    assert origins[None]["requests"] == 1 and origins["GEN-A"]["requests"] == 3
+    # a strict difference orders by volume, not by name: aaa-busy sorts first only once it has MORE
+    _insert(conn, ts=_ts(2), client="aaa-busy", tokens_out=1)
+    assert [c["client"] for c in _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
+            ["by_client"]] == ["claude-code", "pi", "aaa-busy"]
+    _insert(conn, ts=_ts(2), client="aaa-busy", tokens_out=1)
+    _insert(conn, ts=_ts(2), client="aaa-busy", tokens_out=1)
+    assert [c["client"] for c in _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
+            ["by_client"]] == ["aaa-busy", "claude-code", "pi"]
 
 
 # ------------------------------------------------------------------ filters
@@ -453,7 +464,8 @@ def test_error_bodies(tmp_path, params, code, extra):
 def test_366_day_window_is_allowed(tmp_path):
     status, body = U.query(_db(tmp_path), _cfg(),
                            {"from": "2025-10-05", "to": "2026-10-05"})
-    assert status == 200
+    assert status == 200, body                    # exactly 366 days: the cap is inclusive
+    assert body["window"] == {"from": "2025-10-05", "to": "2026-10-05", "timezone": "UTC"}
 
 
 def test_unavailable_when_the_log_is_unreadable(tmp_path):
@@ -485,9 +497,18 @@ def test_note_headers_since_when_nothing_is_attributed(tmp_path):
 
 
 def test_notes_shape_and_no_partial_period_for_a_closed_window(tmp_path):
-    body = _q(_db(tmp_path), **{"from": "2026-10-01", "to": "2026-10-05"})
+    conn = _db(tmp_path)
+    _insert(conn, ts=_ts(1), client="claude-code")
+    _insert(conn, ts=_ts(2), client="pi")
+    body = _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
     assert all({"code", "text"} == set(n) for n in body["notes"])
+    # closed window (to < today) + every row in it attributed => nothing to note
     assert body["notes"] == []
+
+    # an empty log is NOT "nothing to note": with no attributed row anywhere, HEADERS_SINCE still
+    # fires (contract §4.6) so a consumer can explain an origin filter that returns nothing.
+    empty = _q(_db(tmp_path, "empty.sqlite"), **{"from": "2026-10-01", "to": "2026-10-05"})
+    assert [n["code"] for n in empty["notes"]] == ["HEADERS_SINCE"]
 
 
 # -------------------------------------------------------------- http surface
@@ -513,6 +534,7 @@ def _app(tmp_path, cfg=None):
 
 
 def build_app_for_tests(cfg, db_path):
+    # local import: the module-level one would pull the whole server in at collection
     from saint.server import build_app
     return build_app(cfg, db_path=db_path)
 
@@ -593,13 +615,15 @@ def test_usage_route_reports_what_the_apis_recorded(tmp_path):
         client.post("/v1/chat/completions", json={
             "model": "saint-cloud-anthropic", "messages": [{"role": "user", "content": "hi"}]},
             headers=_HEADERS)
+    # a window wider than 366 days is a 400, so stay inside the cap while still covering `now`
+    frm = (datetime.now(UTC) - timedelta(days=200)).date().isoformat()
     today = datetime.now(UTC).date().isoformat()
-    resp = client.get(f"/usage/v1?from=2020-01-01&to={today}&granularity=total")
-    assert resp.status_code == 200
+    resp = client.get(f"/usage/v1?from={frm}&to={today}&granularity=total")
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["contract"] == "hybrid-usage/1"
     assert body["provider"]["name"] == "saint"
-    assert body["window"] == {"from": "2020-01-01", "to": today, "timezone": "UTC"}
+    assert body["window"] == {"from": frm, "to": today, "timezone": "UTC"}
     assert body["currency"] == "USD"
     assert body["totals"]["requests"] == 1
     assert body["by_client"][0]["client"] == "claude-code"
@@ -649,3 +673,55 @@ def test_usage_route_unavailable_on_db_error(tmp_path, monkeypatch):
 def test_provider_version_is_the_package_version():
     assert U.provider_version() in ("0.1.0", "unknown")
     assert U.CONTRACT == "hybrid-usage/1"
+
+
+# ----------------------------------------------------------------------- cli
+
+def test_cli_usage_prints_the_same_json(tmp_path, monkeypatch):
+    """`saint usage` reads the log itself — no server, no dispatch — and prints the same body the
+    route serves. Config is test_cli's SAMPLE_CFG: `local-small` (name ⇒ billing local) and
+    `cloud-large` (anthropic, priced)."""
+    from typer.testing import CliRunner
+
+    from saint import cli as cli_mod
+    from tests.test_cli import SAMPLE_CFG
+
+    cfg_path = tmp_path / "config.toml"
+    db_path = tmp_path / "log.sqlite"
+    cfg_path.write_text(SAMPLE_CFG.format(db=db_path.as_posix()).replace(
+        'model = "claude-opus-4-7"',
+        'model = "claude-opus-4-7"\nprice_in = 4.0\nprice_out = 20.0').replace(
+        'model = "qwen2.5-3b-instruct"',
+        'model = "qwen2.5-3b-instruct"\ntok_s = 100.0\nwatts = 600.0'))
+    conn = _db(tmp_path)
+    _insert(conn, ts=_ts(2), backend="local-small", tokens_in=100, tokens_out=1000,
+            client="claude-code", origin="GEN-A")
+    _insert(conn, ts=_ts(3), backend="cloud-large", tokens_in=100, tokens_out=100,
+            client="pi", origin="GEN-B")
+    conn.close()
+    monkeypatch.delenv("SAINT_USAGE_TOKEN", raising=False)   # the CLI is the local, open path
+
+    args = ["usage", "--from", "2026-10-01", "--to", "2026-10-05", "--config", str(cfg_path)]
+    out = CliRunner().invoke(cli_mod.app, [*args, "--granularity", "total"])
+    assert out.exit_code == 0, out.stdout
+    body = json.loads(out.stdout)
+    assert body["contract"] == "hybrid-usage/1"
+    assert body["window"] == {"from": "2026-10-01", "to": "2026-10-05", "timezone": "UTC"}
+    assert "by_day" not in body                          # granularity=total omits it
+    assert body["totals"]["requests"] == 2
+    assert {b["backend"]: b["billing"] for b in body["by_backend"]} == {
+        "local-small": "local", "cloud-large": "anthropic"}
+    local = next(b for b in body["by_backend"] if b["backend"] == "local-small")
+    assert local["energy_cost_usd"] is not None          # the seat has a bench tok_s
+    assert local["billed_cost_usd"] is None              # local hardware carries no per-token bill
+    assert "by_day" in json.loads(CliRunner().invoke(cli_mod.app, args).stdout)
+
+    # filters reach the same code path
+    out = CliRunner().invoke(cli_mod.app, [*args, "--client", "pi", "--granularity", "total"])
+    assert json.loads(out.stdout)["totals"]["requests"] == 1
+
+    # a bad parameter exits non-zero with the contract's body, not a traceback
+    out = CliRunner().invoke(cli_mod.app, ["usage", "--granularity", "week",
+                                           "--config", str(cfg_path)])
+    assert out.exit_code == 2
+    assert json.loads(out.stdout)["code"] == "INVALID_PARAM"
