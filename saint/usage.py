@@ -15,6 +15,8 @@ Two halves:
 * **The report** (`query`) — one read-only pass over the `requests` table: the disjoint four-way
   token split, a `billing` value per backend, and the two money columns. Money comes from
   `saint.savings`, so `saint savings` and `/usage/v1` cannot price the same tokens differently.
+  `by_backend` is keyed on the backend or seat that SERVED the request (`served_backend`), not on
+  what was asked for, and `by_route` groups the same rows by how they were dispatched.
 
 Nothing here returns prompt or completion text.
 """
@@ -26,6 +28,7 @@ import re
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from importlib import metadata
+from urllib.parse import urlsplit
 
 from saint import savings as _savings
 
@@ -63,6 +66,9 @@ _DAY_START = "T00:00:00"
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _UA_TOKEN = re.compile(r"\s*([^\s/]+)")
+# `johnny-Qwen3.8-…-8003` → 8003. Seat ids that carry no port (`gemma31.service`,
+# `saint-features.service#embed`) simply don't match, so the row stays under backend_chosen.
+_SEAT_PORT = re.compile(r"-(\d+)$")
 
 
 # --------------------------------------------------------------- attribution
@@ -275,6 +281,60 @@ def billing_for(cfg, name: str, cache: dict | None = None) -> tuple[str, object]
     return out
 
 
+def served_backend(cfg, backend_chosen: str, johnny_seat: str | None,
+                   cache: dict | None = None) -> str:
+    """The backend that ACTUALLY served a logged request, which is not always `backend_chosen`.
+
+    `backend_chosen` is what routing picked; the seat that ran it is only in `johnny_seat` —
+    a pool backend logs `local-pool` while one member's seat answered, and a spill logs the
+    requested backend while another role's seat did the work. Both name that seat by id, whose
+    trailing `-<port>` is the one field that maps back onto a configured backend's `base_url`.
+
+    Anything this cannot resolve comes back as `backend_chosen` rather than a guess: a seat id
+    with no port (`gemma31.service`, `saint-features.service#embed`), NULL, or a port that
+    several backends share or none has."""
+    key = (backend_chosen, johnny_seat)
+    if cache is not None and key in cache:
+        return cache[key]
+
+    m = _SEAT_PORT.search(johnny_seat or "")
+    port = int(m.group(1)) if m else None
+    chosen = cfg.backends.get(backend_chosen)
+    out: str | None = None
+    if port is None:
+        pass                                    # no port in the seat id (or NULL): cannot tell
+    elif chosen is not None and not chosen.is_pool and _port_of(chosen.base_url) == port:
+        out = backend_chosen                    # the seat WAS the requested backend's own
+    else:
+        candidates = [b for b in cfg.backends.values()
+                      if not b.is_pool and _port_of(b.base_url) == port]
+        if chosen is not None and chosen.is_pool:      # a pool row can only be one of its members
+            candidates = [b for b in candidates if b.name in chosen.pool]
+            if len(candidates) == 1:
+                out = candidates[0].name
+        if out is None:
+            # a spill went to another role's backend, and role backends are johnny-bound; a port
+            # several non-johnny backends share stays unresolved rather than guessed
+            bound = [b for b in candidates if b.johnny_bound]
+            if len(bound) == 1:
+                out = bound[0].name
+            elif len(candidates) == 1:
+                out = candidates[0].name
+    if out is None:
+        out = backend_chosen
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
+def _port_of(base_url: str | None) -> int | None:
+    """The port of a backend's `base_url`, or None when it has none (cloud) or is unparsable."""
+    try:
+        return urlsplit(base_url).port
+    except ValueError:
+        return None
+
+
 # -------------------------------------------------------------------- auth
 
 def auth_error(headers, token: str | None = None) -> tuple[int, dict] | None:
@@ -293,7 +353,7 @@ def auth_error(headers, token: str | None = None) -> tuple[int, dict] | None:
 # ------------------------------------------------------------------- query
 
 _SELECT = ("SELECT ts, backend_chosen, client, origin, tokens_in, tokens_out, "
-           "cache_read_tokens, cache_write_tokens FROM requests ")
+           "cache_read_tokens, cache_write_tokens, johnny_seat, pinned_backend FROM requests ")
 
 
 def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
@@ -326,17 +386,21 @@ def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
 
     rates = _savings.local_decode_rates(conn)   # log-measured p75 tok/s for seats without `tok_s`
     resolve: dict = {}
+    seats: dict = {}
     totals, by_day, by_backend = _new_agg(), {}, {}
-    by_client, by_origin = {}, {}
+    by_client, by_origin, by_route = {}, {}, {}
     local_rows = local_priced = 0
 
-    for ts, backend, client, origin, tin, tout, cr, cw in rows:
+    for ts, backend, client, origin, tin, tout, cr, cw, seat, pinned in rows:
         tokens = _tokens(tin, tout, cr, cw)
-        billing, b = billing_for(cfg, backend or "", resolve)
+        # what routing picked, and what actually ran: money and by_backend follow the SERVER, so a
+        # pool or spill row is priced on the hardware that burned it
+        served = served_backend(cfg, backend or "", seat, seats)
+        billing, b = billing_for(cfg, served, resolve)
         if billing == "local":
             local_rows += 1
             # electricity for the output tokens; NULL when the seat has no known decode rate
-            elec = _savings.local_elec_per_mtok(cfg, b, backend or "", rates)
+            elec = _savings.local_elec_per_mtok(cfg, b, served, rates)
             energy = (tokens["output"] / 1e6 * elec) if elec is not None else None
             billed = None                       # local hardware carries no per-token bill
             local_priced += energy is not None
@@ -347,9 +411,13 @@ def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
 
         _add(totals, tokens, energy, billed)
         _add(by_day.setdefault((ts or "")[:10], _new_agg()), tokens, energy, billed)
-        _add(by_backend.setdefault(backend, _new_agg()), tokens, energy, billed)
+        _add(by_backend.setdefault(served, _new_agg()), tokens, energy, billed)
         _add(by_client.setdefault(client or "unknown", _new_agg()), tokens, energy, billed)
         _add(by_origin.setdefault(origin, _new_agg()), tokens, energy, billed)
+        chosen = cfg.backends.get(backend or "")
+        dispatch = ((chosen.name, "pool") if chosen is not None and chosen.is_pool
+                    else ("pinned", "pinned") if pinned is not None else ("routed", "routed"))
+        _add(by_route.setdefault(dispatch, _new_agg()), tokens, energy, billed)
 
     # keys in the contract's order; by_day only when granularity=day
     body: dict = {
@@ -372,6 +440,9 @@ def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
                                    "model": getattr(b, "model", None), **_money_entry(agg)})
     body["by_client"] = [{"client": key, **_entry(agg)} for key, agg in _sorted_entries(by_client)]
     body["by_origin"] = [{"origin": key, **_entry(agg)} for key, agg in _sorted_entries(by_origin)]
+    # SAINT extension (the contract allows extra fields): how the rows were dispatched
+    body["by_route"] = [{"route": label, "kind": kind, **_entry(agg)}
+                        for (label, kind), agg in _sorted_entries(by_route)]
     body["notes"] = _notes(win, rows, first_attr, local_rows, local_priced)
     return 200, body
 

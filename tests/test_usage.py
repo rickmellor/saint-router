@@ -37,8 +37,9 @@ def _ts(day: int, hour: int = 12, month: int = 10) -> str:
 
 
 def _cfg() -> Config:
-    """Local seats (one with a bench tok/s, one without), one backend per billing family, and a
-    cloud tier with no prices. [energy] and the seat watts are pinned so money is exact."""
+    """Local seats (one with a bench tok/s, one without, both on their own port), a pool of them,
+    one backend per billing family, and a cloud tier with no prices. [energy] and the seat watts
+    are pinned so money is exact."""
     def openai(name, **kw):
         base = dict(provider="openai", model=f"{name}-model", api_key_env=None, api_key=None,
                     base_url="http://x/v1", aliases=(), timeout_s=60)
@@ -47,9 +48,14 @@ def _cfg() -> Config:
 
     backends = {
         # johnny-bound seat with a bench decode rate -> billing local, energy priced
-        "local-coder": openai("local-coder", johnny_role="coder", tok_s=100.0, watts=600.0),
-        # named local*, no tok_s and no log samples -> local with NO energy model
-        "local-pool": openai("local-pool"),
+        "local-coder": openai("local-coder", base_url="http://127.0.0.1:8001/v1",
+                              johnny_role="coder", tok_s=100.0, watts=600.0),
+        # a second seat: named local*, no tok_s and no log samples -> local with NO energy model
+        "local-worker": openai("local-worker", base_url="http://127.0.0.1:8002/v1",
+                               johnny_role="worker"),
+        # a pool of both: its rows log THIS name, and the serving seat is only in johnny_seat
+        "local-pool": openai("local-pool", base_url=None,
+                             pool=("local-coder", "local-worker")),
         "cloud-anthropic": BackendConfig(
             name="cloud-anthropic", provider="anthropic", model="claude-opus-5-5",
             api_key_env="ANTHROPIC_API_KEY", api_key=None, base_url=None, aliases=("opus",),
@@ -85,14 +91,16 @@ def _cfg() -> Config:
 
 def _insert(conn, *, ts, backend="local-coder", model_field="saint-auto", tokens_in=100,
             tokens_out=100, cache_read=None, cache_write=None, client="claude-code",
-            origin=None, session=None, job_id=None, latency=None, success=True):
+            origin=None, session=None, job_id=None, latency=None, success=True,
+            johnny_seat=None, pinned_backend=None):
     conn.execute(
         "INSERT INTO requests (ts, request_id, model_field, urgency_used, backend_chosen,"
         " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, backend_latency_ms,"
-        " success, prompt_storage_mode, client, origin, session, job_id)"
-        " VALUES (?, 'r', ?, 'normal', ?, ?, ?, ?, ?, ?, ?, 'full', ?, ?, ?, ?)",
+        " success, prompt_storage_mode, client, origin, session, job_id, johnny_seat,"
+        " pinned_backend)"
+        " VALUES (?, 'r', ?, 'normal', ?, ?, ?, ?, ?, ?, ?, 'full', ?, ?, ?, ?, ?, ?)",
         (ts, model_field, backend, tokens_in, tokens_out, cache_read, cache_write, latency,
-         1 if success else 0, client, origin, session, job_id))
+         1 if success else 0, client, origin, session, job_id, johnny_seat, pinned_backend))
 
 
 def _db(tmp_path, name="log.sqlite"):
@@ -340,6 +348,122 @@ def test_energy_rate_uses_log_when_config_is_silent(tmp_path):
     body = _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
     by = {r["backend"]: r for r in body["by_backend"]}
     assert by["local-pool"]["energy_cost_usd"] is not None
+
+
+# -------------------------------------------------------- the seat that SERVED
+
+def _pool_cfg():
+    """`_cfg()` plus a pool of the two seats and three plain locals: one sharing local-coder's
+    port (so that port is ambiguous, and a `local-coder` row there resolves on rule 1 — the
+    requested backend's own port), one alone on an unknown port (the single-candidate case), and
+    two sharing another (a port nothing johnny-bound serves)."""
+    bk = _cfg().backends
+    return replace(_cfg(), backends={
+        **bk,
+        "local-extra": replace(bk["local-worker"], name="local-extra", johnny_role=None,
+                               base_url="http://127.0.0.1:8001/v1"),
+        "local-plain": replace(bk["local-worker"], name="local-plain", johnny_role=None,
+                               base_url="http://127.0.0.1:8009/v1"),
+        # two locals on one port, neither a seat: that port is ambiguous, so it resolves to neither
+        "local-plain2": replace(bk["local-worker"], name="local-plain2", johnny_role=None,
+                                base_url="http://127.0.0.1:8010/v1"),
+        "local-plain3": replace(bk["local-worker"], name="local-plain3", johnny_role=None,
+                                base_url="http://127.0.0.1:8010/v1"),
+        "local-pool": replace(bk["local-pool"], pool=("local-coder", "local-worker")),
+    })
+
+
+def test_pool_row_is_counted_on_the_member_that_served(tmp_path):
+    conn = _db(tmp_path)
+    _insert(conn, ts=_ts(1), backend="local-pool", tokens_out=10,
+            johnny_seat="johnny-Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ-8002")
+    body = _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
+    by = {r["backend"]: r for r in body["by_backend"]}
+    assert set(by) == {"local-worker"}           # not `local-pool`: the pool did not serve it
+    assert by["local-worker"]["requests"] == 1 and by["local-worker"]["billing"] == "local"
+
+
+def test_spill_row_is_counted_on_the_seat_that_did_the_work(tmp_path):
+    conn = _db(tmp_path)
+    # routing picked the coder seat; it was saturated, so the worker seat answered
+    _insert(conn, ts=_ts(1), backend="local-coder", tokens_out=10,
+            johnny_seat="johnny-Worker-Seat-8002")
+    by = {r["backend"]: r for r in
+          _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})["by_backend"]}
+    assert set(by) == {"local-worker"}
+
+
+def test_served_backend_when_the_seat_cannot_be_resolved(tmp_path):
+    conn = _db(tmp_path)
+    for seat in (None, "gemma31.service", "saint-features.service#embed"):
+        _insert(conn, ts=_ts(1), backend="local-coder", tokens_out=10, johnny_seat=seat)
+    _insert(conn, ts=_ts(1), backend="local-coder", tokens_out=10,
+            johnny_seat="johnny-Who-Knows-8009")   # a port no configured backend serves
+    by = {r["backend"]: r for r in
+          _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})["by_backend"]}
+    assert set(by) == {"local-coder"} and by["local-coder"]["requests"] == 4
+
+
+@pytest.mark.parametrize("chosen,seat,want", [
+    ("local-pool", "johnny-Coder-Seat-8001", "local-coder"),      # pool → member by port
+    ("local-pool", "johnny-Coder-Seat-8009", "local-pool"),       # a non-member's port: not guessed
+    ("local-coder", "johnny-Coder-Seat-8001", "local-coder"),     # its own port, though ambiguous
+    ("local-coder", "johnny-Worker-Seat-8002", "local-worker"),   # spill
+    ("local-coder", "johnny-Who-Knows-8009", "local-plain"),      # one candidate, not johnny-bound
+    ("local-coder", "johnny-Who-Knows-8010", "local-coder"),      # two candidates, neither a seat
+    ("local-coder", "johnny-Who-Knows-8001", "local-coder"),      # its own port, shared with one
+    ("local-coder", "gemma31.service", "local-coder"),            # a seat id with no port
+    ("local-coder", None, "local-coder"),
+    ("cloud-anthropic", "johnny-Coder-Seat-8001", "local-coder"),
+    ("backend-that-vanished", "johnny-Worker-Seat-8002", "local-worker"),
+])
+def test_served_backend_resolution(chosen, seat, want):
+    assert U.served_backend(_pool_cfg(), chosen, seat) == want
+
+
+def test_served_backend_memoises_like_billing_for():
+    cfg, calls = _pool_cfg(), []
+    real = U._port_of
+    with patch.object(U, "_port_of", lambda url: calls.append(url) or real(url)):
+        U.served_backend(cfg, "local-pool", "johnny-Coder-Seat-8001", cache := {})
+        after_first = len(calls)
+        for _ in range(3):
+            assert U.served_backend(cfg, "local-pool", "johnny-Coder-Seat-8001", cache) == "local-coder"
+    assert after_first and len(calls) == after_first   # one pass over the config, not four
+    assert cache == {("local-pool", "johnny-Coder-Seat-8001"): "local-coder"}
+
+
+def test_pool_energy_is_priced_on_the_serving_seat(tmp_path):
+    conn = _db(tmp_path)
+    # the pool name has no rate of its own: 0.5 Mtok out priced on local-coder's bench tok_s
+    _insert(conn, ts=_ts(3), backend="local-pool", tokens_in=900, tokens_out=500_000,
+            cache_read=900, latency=1000, johnny_seat="johnny-Coder-Seat-8001")
+    body = _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
+    by = {r["backend"]: r for r in body["by_backend"]}
+    assert by["local-coder"]["energy_cost_usd"] == 0.3
+    assert body["totals"]["energy_cost_usd"] == 0.3
+    assert "NO_ENERGY_MODEL" not in {n["code"] for n in body["notes"]}
+
+
+# ------------------------------------------------------------------ by_route
+
+def test_by_route_splits_pool_pinned_and_routed(tmp_path):
+    conn = _db(tmp_path)
+    _insert(conn, ts=_ts(1), backend="local-pool", tokens_out=10,
+            johnny_seat="johnny-Coder-Seat-8001")
+    _insert(conn, ts=_ts(1), backend="cloud-anthropic", tokens_out=10,
+            pinned_backend="cloud-anthropic")
+    _insert(conn, ts=_ts(1), backend="local-coder", tokens_out=10,
+            johnny_seat="johnny-Coder-Seat-8001")
+    _insert(conn, ts=_ts(1), backend="local-coder", tokens_out=10)
+    body = _q(conn, **{"from": "2026-10-01", "to": "2026-10-05"})
+    assert [(e["route"], e["kind"], e["requests"]) for e in body["by_route"]] == [
+        ("routed", "routed", 2), ("local-pool", "pool", 1), ("pinned", "pinned", 1)]
+    pool = next(e for e in body["by_route"] if e["kind"] == "pool")
+    assert pool["tokens_by_type"]["output"] == 10
+    assert "prompt" not in json.dumps(body)
+    # filters narrow it the same way they narrow by_client
+    assert _q(conn, client="pi", **{"from": "2026-10-01", "to": "2026-10-05"})["by_route"] == []
 
 
 # ------------------------------------------------------------------ windows

@@ -41,6 +41,22 @@ Claude Code sends them via `ANTHROPIC_CUSTOM_HEADERS`; `saint-agent` sets them p
 
 ## SAINT specifics
 
+- **`by_backend` is the backend or seat that SERVED the request**, not what routing asked for
+  (`usage.served_backend`). `backend_chosen` records the decision, and on two kinds of row that is
+  not the hardware that ran it: a **pool** row logs the pool backend (`local-pool`) while one member
+  seat answered, and a **spill** row logs the requested backend while another role's seat did the
+  work. Both put the actual seat in `johnny_seat`, so SAINT resolves it by the seat id's trailing
+  `-<port>` against each backend's `base_url` port — restricted to the pool's members for pool
+  rows, and preferring johnny-bound backends otherwise. What it cannot resolve stays under
+  `backend_chosen`: a seat id with no port (`gemma31.service`, `saint-features.service#embed`),
+  NULL, or a port several backends share. `billing`, `energy_cost_usd` and the `by_backend` key all
+  follow the served seat, so pool and spill rows are priced on the machine that burned the watts.
+  Filters are unaffected.
+- **`by_route`** — SAINT's own breakdown of how the rows were dispatched (a contract extension; the
+  contract allows extra fields), over every row matching the filters like `by_client`:
+  `pool` (route = the pool backend's name, e.g. `local-pool`), `pinned` (a `!alias` prefix or a
+  `saint-<backend>` model id forced it; route = `pinned`) and `routed` (the classifier picked it;
+  route = `routed`). Counts are requests and tokens only, like the other non-money breakdowns.
 - **`billing` per backend** — `local` when the backend is johnny-bound or its name starts with
   `local` (the same test `saint savings` uses); otherwise from the backend's `provider`:
   `anthropic`→`anthropic`, `bedrock`→`bedrock`, `openai`→`openai`, `vertex_ai`/`vertex`→`vertex`,
