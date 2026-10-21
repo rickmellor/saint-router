@@ -421,6 +421,21 @@ def test_served_backend_resolution(chosen, seat, want):
     assert U.served_backend(_pool_cfg(), chosen, seat) == want
 
 
+def test_served_backend_breaks_a_shared_bound_port_with_the_spill_list():
+    # live config: local-worker2 and local-uncensored are both johnny-bound on :8003; a coder
+    # spill there can only be worker2, because only `worker2` is in local-coder's spill roles
+    cfg = _pool_cfg()
+    bk = cfg.backends
+    cfg = replace(cfg, backends={
+        **bk,
+        "local-coder": replace(bk["local-coder"], spill=("worker",)),
+        "local-alt": replace(bk["local-worker"], name="local-alt", johnny_role="alt"),
+    })
+    assert U.served_backend(cfg, "local-coder", "johnny-Worker-Seat-8002") == "local-worker"
+    # without a spill list to decide by, the shared port stays unresolved
+    assert U.served_backend(cfg, "local-plain", "johnny-Worker-Seat-8002") == "local-plain"
+
+
 def test_served_backend_memoises_like_billing_for():
     cfg, calls = _pool_cfg(), []
     real = U._port_of

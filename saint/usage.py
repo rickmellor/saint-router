@@ -316,6 +316,10 @@ def served_backend(cfg, backend_chosen: str, johnny_seat: str | None,
             # a spill went to another role's backend, and role backends are johnny-bound; a port
             # several non-johnny backends share stays unresolved rather than guessed
             bound = [b for b in candidates if b.johnny_bound]
+            if len(bound) > 1 and chosen is not None and chosen.spill:
+                # two seats bound on one port (a live role and a profile-specific one): a spill
+                # can only have gone to a role the requested backend lists in `spill`
+                bound = [b for b in bound if b.johnny_role in chosen.spill]
             if len(bound) == 1:
                 out = bound[0].name
             elif len(candidates) == 1:
