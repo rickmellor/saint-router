@@ -37,7 +37,8 @@ def parse_prefixes(
     (pi, opencode) before the message ever reaches SAINT. The two differ on unknown
     tokens: '!<typo>' raises UnknownPrefixError (fail loud on a typo'd routing
     directive), while an unknown '@token' is left as ordinary message text ('@rick
-    check this' must not 400).
+    check this' must not 400). So is a '!' token containing '/' ('!../a/b.py'): no
+    backend name has one, so it is a path, not a typo.
 
     Multiple prefixes are space-separated and parsed left-to-right until the
     first non-prefix token. Last urgency wins. Returns the stripped content
@@ -73,8 +74,8 @@ def parse_prefixes(
             urgency = token
         elif token in alias_to_backend:
             pinned = alias_to_backend[token]
-        elif sigil == "@":
-            break  # unknown @token = plain message text (a mention), not a typo'd prefix
+        elif sigil == "@" or "/" in token:
+            break  # unknown @token = a mention; a token with '/' is a path — plain text, not a typo'd prefix
         else:
             raise UnknownPrefixError(token, urgencies, all_known_tokens)
         raw_tokens.append(sigil + token)

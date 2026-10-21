@@ -268,7 +268,8 @@ async def decide_route(
 
     parsed = ParsedPrefixes(urgency=None, pinned_backend=None,
                              stripped=full_text or "", raw="")
-    if full_text is not None:   # image-bearing turns honor !/@ pins too (2026-10-19)
+    # image-bearing turns honor !/@ pins too (2026-10-19); tool-result turns never do (2026-10-21)
+    if full_text is not None and not (last_user or {}).get("tool_turn"):
         parsed = parse_prefixes(full_text, urgencies, backend_alias_map)
 
     pinned_via_model: str | None = None

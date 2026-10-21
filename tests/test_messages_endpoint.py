@@ -311,3 +311,28 @@ def test_messages_thinking_kept_when_backend_stable(tmp_path):
     sent = acreate.call_args.kwargs["messages"]
     assistant = [m for m in sent if m["role"] == "assistant"][0]
     assert any(b.get("type") == "thinking" for b in assistant["content"])
+
+
+def test_messages_tool_result_text_is_not_parsed_for_prefixes(tmp_path):
+    # 2026-10-21: a tool_result whose output began '!<word>' was parsed as a routing prefix
+    # and 400'd ('unknown prefix token') a Claude Code pool job 50 turns in
+    app, client = _app(tmp_path)
+    acreate = AsyncMock(return_value=_ANTHROPIC_OK)
+    clf = AsyncMock(return_value=_CLS_RESP)
+    tool_out = "!nosuchbackend ../tools/creds/tests/test_reference_writer.py:12: hit"
+    with patch("saint.backends.litellm.anthropic.messages.acreate", acreate), \
+         patch("saint.classifier.call_backend", clf):
+        resp = client.post("/v1/messages", json={
+            "model": "auto", "max_tokens": 10, "system": "agent",
+            "messages": [
+                {"role": "user", "content": "find the writer tests"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "grep", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1",
+                     "content": [{"type": "text", "text": tool_out}]}]},
+            ]})
+    assert resp.status_code == 200
+    assert "x-saint-pinned" not in resp.headers
+    sent = acreate.call_args.kwargs["messages"]
+    assert sent[-1]["content"][0]["content"][0]["text"] == tool_out   # forwarded untouched

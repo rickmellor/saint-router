@@ -123,3 +123,11 @@ def test_prefix_then_unknown_at_token_stays_in_message():
 def test_bang_unknown_token_still_raises():
     with pytest.raises(UnknownPrefixError):
         parse_prefixes("!patinet oops", URGENCIES, BACKENDS)
+
+
+def test_bang_path_token_is_plain_text():
+    # 2026-10-21: '!../tools/x.py' 400'd a pool job; a token with '/' is never a backend name
+    for text in ("!../tools/creds/tests/test_reference_writer.py: 3 hits", "!src/x.c:12: warning"):
+        out = parse_prefixes(text, URGENCIES, BACKENDS)
+        assert out.urgency is None and out.pinned_backend is None
+        assert out.stripped == text and out.raw == ""

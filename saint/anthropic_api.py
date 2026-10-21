@@ -89,9 +89,16 @@ def openai_view(body: dict) -> list[dict[str, Any]]:
         view.append({"role": "system", "content": sys_text})
     for m in body.get("messages", []):
         content = m.get("content")
+        entry: dict[str, Any] = {"role": m.get("role")}
         if isinstance(content, list):
+            # a tool turn's text is tool OUTPUT, not something a person typed: the router must
+            # not parse !/@ routing prefixes out of it (a grep line starting '!' 400'd a pool
+            # job 50 turns in, 2026-10-21)
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                entry["tool_turn"] = True
             content = [_neutralize_block(b) for b in content]
-        view.append({"role": m.get("role"), "content": content})
+        entry["content"] = content
+        view.append(entry)
     return view
 
 
