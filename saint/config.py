@@ -176,6 +176,10 @@ class RoutingConfig:
 class LoggingConfig:
     db_path: str
     prompt_storage: PromptStorageMode
+    # /usage/v1 ignores rows logged before this UTC instant (ISO 8601, normalised to the log's
+    # `+00:00` form). The rows stay in the log — classifier retraining, decode rates and
+    # `saint savings` still read them; only the usage report starts here.
+    usage_since: str | None = None
 
 
 @dataclass(frozen=True)
@@ -469,6 +473,24 @@ def _validate(cfg: Config) -> list[str]:
     return errors
 
 
+def _usage_since(value) -> str | None:
+    """[logging] usage_since → the log's timestamp form, or None. A TOML datetime or a string;
+    naive means UTC."""
+    if value is None or value == "":
+        return None
+    from datetime import UTC, datetime
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as e:
+            raise ConfigError(f"[logging] usage_since is not an ISO 8601 timestamp: {value!r}") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat()
+
+
 def _load_toml(path: Path) -> dict:
     try:
         with path.open("rb") as f:
@@ -632,6 +654,7 @@ def load_config(path: Path) -> Config:
     logging_cfg = LoggingConfig(
         db_path=_expand(log_raw["db_path"]),
         prompt_storage=log_raw.get("prompt_storage", "full"),
+        usage_since=_usage_since(log_raw.get("usage_since")),
     )
 
     c_raw = raw.get("cache", {})

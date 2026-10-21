@@ -110,3 +110,11 @@ curl -s "$B/usage/v1?granularity=total" | jq -e '.contract == "hybrid-usage/1"
 curl -s -o /dev/null -w '%{http_code}\n' "$B/usage/v1?grain=day"        # 400
 curl -s "$B/usage/v1?from=2026-10-20&to=2026-10-01" | jq -r .code       # INVALID_PARAM
 ```
+
+## Cut-off: `[logging] usage_since`
+
+Rows logged before attribution existed carry no client/origin/session. Set
+`usage_since = "2026-10-20T21:30:00Z"` under `[logging]` and `/usage/v1` (and `saint usage`) count only
+rows from that instant; the response carries a `USAGE_SINCE` note instead of `HEADERS_SINCE` when the
+window reaches back past it. Nothing is deleted — classifier retraining, measured decode rates (energy
+pricing) and `saint savings` still read the whole log.

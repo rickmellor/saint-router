@@ -368,7 +368,11 @@ def query(conn, cfg, params: dict[str, str]) -> tuple[int, dict]:
     except _BadParam as e:
         return _error(e.code, str(e), param=e.param, allowed=e.allowed, hint=e.hint)
 
-    sql, args = "WHERE ts >= ? AND ts < ? AND backend_chosen IS NOT NULL", [win["lo"], win["hi"]]
+    # [logging] usage_since: rows before it predate attribution, so the report starts there
+    since = getattr(getattr(cfg, "logging", None), "usage_since", None)
+    win["since"] = since if since and since > win["lo"] else None
+    lo = win["since"] or win["lo"]
+    sql, args = "WHERE ts >= ? AND ts < ? AND backend_chosen IS NOT NULL", [lo, win["hi"]]
     sql += (" AND (model_field IS NULL OR model_field NOT IN ("
             + ",".join("?" * len(_EXCLUDED_MODELS)) + "))")
     args += list(_EXCLUDED_MODELS)
@@ -461,7 +465,12 @@ def _notes(win: dict, rows: list, first_attr: str | None, local_rows: int,
         notes.append({"code": "NO_ENERGY_MODEL",
                       "text": f"{local_rows} local rows exist but no serving seat had a known "
                               "decode rate, so energy_cost_usd would not estimate anything"})
-    if first_attr is None:
+    if win.get("since"):
+        # the cut-off replaces HEADERS_SINCE: the unattributed rows are excluded, not just unlabeled
+        notes.append({"code": "USAGE_SINCE",
+                      "text": f"rows logged before {win['since']} are excluded ([logging] usage_since): "
+                              "they predate attribution"})
+    elif first_attr is None:
         notes.append({"code": "HEADERS_SINCE",
                       "text": "this log holds no attributed rows yet — nothing has been logged "
                               "since attribution was added, so client/origin filters are empty"})

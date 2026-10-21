@@ -864,3 +864,44 @@ def test_cli_usage_prints_the_same_json(tmp_path, monkeypatch):
                                            "--config", str(cfg_path)])
     assert out.exit_code == 2
     assert json.loads(out.stdout)["code"] == "INVALID_PARAM"
+
+
+def _since_cfg(since):
+    cfg = _cfg()
+    return replace(cfg, logging=replace(cfg.logging, usage_since=since))
+
+
+def test_usage_since_excludes_earlier_rows_and_says_so(tmp_path):
+    conn = _db(tmp_path)
+    _insert(conn, ts=_ts(1), tokens_out=10)                  # before the cut-off: excluded
+    _insert(conn, ts=_ts(3), tokens_out=20)
+    body = _q(conn, _since_cfg("2026-10-02T00:00:00+00:00"), **{"from": "2026-10-01", "to": "2026-10-05"})
+    assert body["totals"]["requests"] == 1
+    assert body["totals"]["tokens_by_type"]["output"] == 20
+    codes = {n["code"] for n in body["notes"]}
+    assert "USAGE_SINCE" in codes and "HEADERS_SINCE" not in codes
+
+
+def test_usage_since_before_the_window_changes_nothing(tmp_path):
+    conn = _db(tmp_path)
+    _insert(conn, ts=_ts(1), tokens_out=10)
+    body = _q(conn, _since_cfg("2026-09-01T00:00:00+00:00"), **{"from": "2026-10-01", "to": "2026-10-05"})
+    assert body["totals"]["requests"] == 1
+    assert "USAGE_SINCE" not in {n["code"] for n in body["notes"]}
+
+
+@pytest.mark.parametrize("raw,want", [
+    (None, None), ("", None),
+    ("2026-10-20T21:30:00Z", "2026-10-20T21:30:00+00:00"),
+    ("2026-10-20T21:30:00", "2026-10-20T21:30:00+00:00"),          # naive = UTC
+    ("2026-10-20T16:30:00-05:00", "2026-10-20T21:30:00+00:00"),
+])
+def test_usage_since_parses_to_the_log_form(raw, want):
+    from saint.config import _usage_since
+    assert _usage_since(raw) == want
+
+
+def test_usage_since_rejects_junk():
+    from saint.config import ConfigError, _usage_since
+    with pytest.raises(ConfigError):
+        _usage_since("last tuesday")
