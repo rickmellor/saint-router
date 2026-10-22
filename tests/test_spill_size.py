@@ -2,8 +2,8 @@
 
 Two halves of the same feature: a spill target that is not vLLM still has to report a load,
 and a spill target with a smaller context window (or a slow cold prefill) must not be handed a
-turn it cannot hold. Sizing is an ESTIMATE — chars/3.5 with base64 skipped — so the limits it
-is compared against are guards, not billing numbers."""
+turn it cannot hold. Sizing is an ESTIMATE — chars/3.0 with base64 and thinking text skipped —
+so the limits it is compared against are guards, not billing numbers."""
 from __future__ import annotations
 
 import urllib.request
@@ -96,9 +96,9 @@ def test_seat_load_unreadable_is_unknown(monkeypatch):
 
 
 def test_estimate_counts_strings():
-    assert estimate_request_tokens({"a": "x" * 350}) == 100
+    assert estimate_request_tokens({"a": "x" * 300}) == 100
     turn = {"messages": [{"role": "user", "content": "hello there"}]}
-    assert estimate_request_tokens(turn) == int((len("user") + len("hello there")) / 3.5)
+    assert estimate_request_tokens(turn) == int((len("user") + len("hello there")) / 3.0)
 
 
 def test_estimate_skips_base64_payloads():
@@ -109,6 +109,25 @@ def test_estimate_skips_base64_payloads():
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 7000}},
     ]}]}
     assert estimate_request_tokens(body) < 20
+
+
+def test_estimate_skips_thinking_text():
+    # earlier turns' `thinking` text is ~70 % of a long Claude Code body but the chat template
+    # drops it, so counting it tripled the estimate (measured 2026-10-22: 344K vs 133K real)
+    body = {"messages": [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "T" * 10_000, "signature": "S" * 500},
+        {"type": "text", "text": "t" * 3_000},
+    ]}]}
+    # only the 3,000-char text block is tokenised: 3000 / 3.0 = 1000, plus the ~20 chars the walk
+    # does count — the two block `type` tags and the role
+    assert abs(estimate_request_tokens(body) - 1000) <= 10
+    bare = {"messages": [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "", "signature": ""},
+        {"type": "text", "text": "t" * 3_000},
+    ]}]}
+    assert estimate_request_tokens(body) == estimate_request_tokens(bare)   # thinking text is free
+    # the top-level request option is a dict under the same key name — skipped with it, sizes 0
+    assert estimate_request_tokens({"thinking": {"type": "enabled", "budget_tokens": 8192}}) == 0
 
 
 def test_estimate_empty_and_odd_input():
