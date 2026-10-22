@@ -97,7 +97,8 @@ def _pool_unavailable(pool: str, cfg: Config, reasons: dict[str, str]) -> str:
 async def _run_pool(cfg: Config, pool: str, resolver, breaker: Breaker,
                     attempt: Callable[[Effective], Awaitable[Any]], rid: str,
                     required: frozenset[str], conversation_key: str | None,
-                    caches) -> tuple[Served | None, str | None, Effective | None]:
+                    caches, size: tuple[int, int] | None = None
+                    ) -> tuple[Served | None, str | None, Effective | None]:
     """Walk a pool once, best member first. Each member gets exactly ONE attempt — the next
     member IS the retry, so a member that just failed is never hammered twice behind a
     same-backend retry.
@@ -106,7 +107,7 @@ async def _run_pool(cfg: Config, pool: str, resolver, breaker: Breaker,
     healthy ones, and the pool has no endpoint of its own to be unhealthy. Same 400/422 and
     billing classification as the normal path (a malformed request is not a seat failure)."""
     order, reasons = pool_order_with_reasons(cfg, pool, resolver, required,
-                                             conversation_key, caches)
+                                             conversation_key, caches, size=size)
     error_kind: str | None = None
     last_eff: Effective | None = None
     for eff in order:
@@ -150,6 +151,7 @@ async def run_candidates(
     required: frozenset[str] = frozenset(),
     conversation_key: str | None = None,
     caches=None,
+    size: tuple[int, int] | None = None,
 ) -> tuple[Served | None, str | None, Effective | None]:
     """Try candidates in order; return (served, last_error_kind, last_effective).
 
@@ -167,6 +169,10 @@ async def run_candidates(
     and `caches` are what a sticky pool uses to keep a conversation on the member that served
     it, and are ignored by every other candidate.
 
+    `size` = (estimated prompt tokens, requested output tokens) from saint/sizing.py, threaded to
+    the spill decision so an oversized turn is not handed to a seat that cannot hold it (or would
+    cold-prefill it for a minute). None = no size information, every spill candidate stays eligible.
+
     Bedrock auth handling: a classified credential failure force-opens the breaker with
     the (longer) auth cooldown, skips the pointless same-backend retry, and spawns the
     SSO browser login once per expiry event. A half-open trial on an auth-flagged bedrock
@@ -183,7 +189,8 @@ async def run_candidates(
             # A pool is not a backend you can call: it expands to its members here, and the
             # member walk owns its own capability filtering, breaker and error text.
             served, pool_err, pool_eff = await _run_pool(
-                cfg, cand, resolver, breaker, attempt, rid, required, conversation_key, caches)
+                cfg, cand, resolver, breaker, attempt, rid, required, conversation_key, caches,
+                size)
             if served is not None:
                 return served, None, served.eff
             if pool_err is not None:
@@ -210,7 +217,7 @@ async def run_candidates(
             if bedrock_state is not None:
                 bedrock_state.spawned_profiles.discard(profile)  # next expiry may re-prompt
 
-        eff = resolve_for_dispatch(cfg, cand, resolver, required)
+        eff = resolve_for_dispatch(cfg, cand, resolver, required, size=size)
         miss = missing(required, eff.capabilities)
         if miss:
             print(f"[router] req#{rid}: skipping '{cand}' ({eff.backend.model}): "

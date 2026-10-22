@@ -74,11 +74,17 @@ def _role_caps(cfg: Config, b: BackendConfig, role: str, r: Resolution | None) -
 
 
 def _spill(cfg: Config, b: BackendConfig, resolver: JohnnyResolver, own_seat: str | None,
-           own_load: int | None, required: frozenset[str] = frozenset()):
+           own_load: int | None, required: frozenset[str] = frozenset(),
+           size: tuple[int, int] | None = None):
     """The least-loaded READY seat among b.spill's roles, excluding the backend's own seat.
     Returns (Resolution, load, capabilities) or None. Unknown loads sort last so a readable
     seat wins. A seat that cannot serve `required` is never a candidate — spilling onto a seat
-    dispatch would then skip loses the only capable seat we had."""
+    dispatch would then skip loses the only capable seat we had.
+
+    `size` = (estimated prompt tokens, requested output tokens) for the request being spilled
+    (saint/sizing.py). When given, a target whose seat could not take the turn is skipped:
+    over its context window it fails outright, and over its spill_max_prompt it is a cold
+    prefill we should not hand over — its own role still gets big turns, this is borrowing."""
     best = None
     for role in b.spill:
         r = resolver.resolve(role)
@@ -89,6 +95,18 @@ def _spill(cfg: Config, b: BackendConfig, resolver: JohnnyResolver, own_seat: st
         caps = _role_caps(cfg, b, role, r)
         if missing(required, caps):
             continue
+        if size is not None:
+            other = next((x for x in cfg.backends.values() if x.johnny_target == role), None)
+            if other is not None:
+                prompt, output = size
+                if other.context is not None and prompt + output > other.context:
+                    print(f"[saint] spill skip {role}: request ~{prompt}+{output} tokens "
+                          f"> context {other.context}", file=sys.stderr)
+                    continue
+                if other.spill_max_prompt is not None and prompt > other.spill_max_prompt:
+                    print(f"[saint] spill skip {role}: request ~{prompt}+{output} tokens "
+                          f"> spill_max_prompt {other.spill_max_prompt}", file=sys.stderr)
+                    continue
         load = seat_load(r.endpoint)
         key = (load if load is not None else 10**6, b.spill.index(role))
         if best is None or key < best[0]:
@@ -129,7 +147,8 @@ def _escape_reason(cfg: Config, b: BackendConfig, eff: Effective, resolver: John
 def pool_order_with_reasons(cfg: Config, pool_name: str, resolver: JohnnyResolver | None,
                             required: frozenset[str] = frozenset(),
                             conversation_key: str | None = None, caches=None,
-                            advance: bool = True
+                            advance: bool = True,
+                            size: tuple[int, int] | None = None
                             ) -> tuple[list[Effective], dict[str, str]]:
     """Eligible pool members, best-first, plus why each INELIGIBLE member was dropped.
 
@@ -146,7 +165,7 @@ def pool_order_with_reasons(cfg: Config, pool_name: str, resolver: JohnnyResolve
         if is_pool(b):                    # nested pools are a config error; never recurse
             reasons[member] = "nested pool"
             continue
-        eff = resolve_for_dispatch(cfg, member, resolver, required)
+        eff = resolve_for_dispatch(cfg, member, resolver, required, size=size)
         # State first: a member that escaped (to cloud, usually) is out for that reason, and
         # reporting the escape target's capabilities instead would blame the wrong thing.
         if eff.state_at_dispatch not in _ELIGIBLE_STATES:
@@ -191,19 +210,21 @@ def pool_order_with_reasons(cfg: Config, pool_name: str, resolver: JohnnyResolve
 
 def pool_order(cfg: Config, pool_name: str, resolver: JohnnyResolver | None,
                required: frozenset[str] = frozenset(),
-               conversation_key: str | None = None, caches=None) -> list[Effective]:
+               conversation_key: str | None = None, caches=None,
+               size: tuple[int, int] | None = None) -> list[Effective]:
     return pool_order_with_reasons(cfg, pool_name, resolver, required,
-                                   conversation_key, caches)[0]
+                                   conversation_key, caches, size=size)[0]
 
 
 def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolver | None,
                          required: frozenset[str] = frozenset(),
-                         conversation_key: str | None = None, caches=None) -> Effective:
+                         conversation_key: str | None = None, caches=None,
+                         size: tuple[int, int] | None = None) -> Effective:
     b = cfg.backends[backend_name]
     if is_pool(b):
         # Single-effective view of a pool (for callers that do not walk the whole order):
         # the member that would serve now. run_candidates walks pool_order itself.
-        order = pool_order(cfg, backend_name, resolver, required, conversation_key, caches)
+        order = pool_order(cfg, backend_name, resolver, required, conversation_key, caches, size)
         return order[0] if order else Effective(b, "pool_empty", None)
     # Unbound backend (or johnny disabled): pure static, no johnny call ever.
     if not b.johnny_bound or resolver is None or cfg.johnny is None:
@@ -227,7 +248,7 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
         if is_draining(res.seat, res.endpoint, target):
             # `saint drain <seat>`: the seat stays up for its in-flight work but takes nothing new — a ready spill seat
             # serves instead, else the normal fallback. Never the draining seat, whatever its load.
-            alt = _spill(cfg, b, resolver, res.seat, None, required) if b.spill else None
+            alt = _spill(cfg, b, resolver, res.seat, None, required, size) if b.spill else None
             if alt is not None:
                 r2, load2, caps2 = alt
                 print(f"[saint] drain {res.seat}: {target}→{r2.seat} (load {load2})", file=sys.stderr)
@@ -239,7 +260,7 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
             return replace(fb, drained=res.seat)
         load = seat_load(res.endpoint) if b.spill else None
         if b.spill and load is not None and load >= b.spill_at:
-            alt = _spill(cfg, b, resolver, res.seat, load, required)
+            alt = _spill(cfg, b, resolver, res.seat, load, required, size)
             if alt is not None:
                 r2, load2, caps2 = alt
                 print(f"[saint] spill {target}→{r2.seat} (load {load}→{load2})", file=sys.stderr)
@@ -251,7 +272,7 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
             # The own seat cannot answer this turn (an image landed on a text-only seat) and the
             # backend may borrow: hand it to whichever spill seat is ready AND capable, load
             # aside — a busy capable seat beats an idle incapable one.
-            alt = _spill(cfg, b, resolver, res.seat, None, required)
+            alt = _spill(cfg, b, resolver, res.seat, None, required, size)
             if alt is not None:
                 r2, load2, caps2 = alt
                 print(f"[saint] capability spill {target}→{r2.seat} (needs {sorted(required)})",
@@ -267,7 +288,7 @@ def resolve_for_dispatch(cfg: Config, backend_name: str, resolver: JohnnyResolve
     if res.state in ("loading", "absent") and cfg.johnny.ensure_load:
         resolver.ensure_load(target)
     if b.spill:
-        alt = _spill(cfg, b, resolver, res.seat, None, required)
+        alt = _spill(cfg, b, resolver, res.seat, None, required, size)
         if alt is not None:
             r2, load2, caps2 = alt
             print(f"[saint] spill {target}({res.state})→{r2.seat} (load {load2})", file=sys.stderr)

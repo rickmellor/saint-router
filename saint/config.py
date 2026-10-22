@@ -48,6 +48,10 @@ class BackendConfig:
     # never borrowed. Every spill is logged (spilled_from/spilled_to) — `saint spills`.
     spill: tuple[str, ...] = ()
     spill_at: int = 6
+    # Largest estimated prompt (saint/sizing.py) this backend's seat accepts AS A SPILL TARGET —
+    # a cold-prefill guard: a seat with no cached prefix pays full prefill for a huge turn it was
+    # only borrowed for. Never limits requests to its OWN role. None = no limit.
+    spill_max_prompt: int | None = None
     # vLLM request priority for this backend's work (lower = sooner; seats need --scheduling-policy priority).
     priority: int | None = None
     # --- provider = "bedrock" only (validated) ---
@@ -565,6 +569,8 @@ def load_config(path: Path) -> Config:
             on_error=b.get("on_error"),
             spill=tuple(b.get("spill", ())),
             spill_at=int(b.get("spill_at", 6)),
+            spill_max_prompt=(int(b["spill_max_prompt"])
+                              if b.get("spill_max_prompt") is not None else None),
             priority=int(b["priority"]) if b.get("priority") is not None else None,
             aws_region=b.get("aws_region"),
             aws_profile=b.get("aws_profile"),

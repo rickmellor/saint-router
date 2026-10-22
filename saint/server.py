@@ -22,6 +22,7 @@ from saint import savings as _savings
 from saint.backends import call_embeddings
 from saint.dispatch import BedrockRuntime, dispatch_candidates, run_candidates
 from saint.route_cache import Breaker, RouteCaches, TTLCache
+from saint.sizing import estimate_request_tokens, requested_output_tokens
 from saint.storage import LogRow, build_log_row, log_request, open_db
 from saint import usage as _usage
 
@@ -783,6 +784,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 bedrock_state=app.state.bedrock_state,
                 required=decision.required_capabilities,
                 conversation_key=decision.conversation_key, caches=app.state.route_caches,
+                size=(estimate_request_tokens(body), requested_output_tokens(body)),
             )
 
             if result is None:
@@ -884,6 +886,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             bedrock_state=app.state.bedrock_state,
             required=decision.required_capabilities,
             conversation_key=decision.conversation_key, caches=app.state.route_caches,
+            size=(estimate_request_tokens(body), requested_output_tokens(body)),
         )
         success = result is not None
         served = result.backend if result else None
@@ -1099,6 +1102,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 bedrock_state=app.state.bedrock_state,
                 required=decision.required_capabilities,
                 conversation_key=decision.conversation_key, caches=app.state.route_caches,
+                size=(estimate_request_tokens(body), requested_output_tokens(body)),
             )
             if result is None:
                 _log_messages_row(served=None, eff=last_eff,
@@ -1175,6 +1179,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             bedrock_state=app.state.bedrock_state,
             required=decision.required_capabilities,
             conversation_key=decision.conversation_key, caches=app.state.route_caches,
+            size=(estimate_request_tokens(body), requested_output_tokens(body)),
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 

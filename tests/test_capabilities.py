@@ -707,9 +707,9 @@ async def test_run_candidates_resolves_each_candidate_with_required(monkeypatch)
     seen: list = []
     real = binding.resolve_for_dispatch
 
-    def spy(cfg_, name, resolver, required=frozenset()):
+    def spy(cfg_, name, resolver, required=frozenset(), size=None):
         seen.append(required)
-        return real(cfg_, name, resolver, required)
+        return real(cfg_, name, resolver, required, size=size)
 
     monkeypatch.setattr(dispatch_mod, "resolve_for_dispatch", spy)
     cfg = _cfg([_b("seat", johnny_role="coder")], johnny=_johnny())

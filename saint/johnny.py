@@ -134,9 +134,12 @@ _load_cache: dict[str, tuple[float, int | None]] = {}
 
 
 def seat_load(endpoint: str | None, timeout: float = 0.5) -> int | None:
-    """Requests in flight on a vLLM seat = num_requests_running + num_requests_waiting, read from its
-    Prometheus /metrics (endpoint is the OpenAI base url, e.g. http://127.0.0.1:8006/v1). Cached ~1 s.
-    None when unreadable (not vLLM, seat down) — callers must treat None as "unknown", never as idle."""
+    """Requests in flight on a vLLM or llama.cpp seat, read from its Prometheus /metrics (endpoint is
+    the OpenAI base url, e.g. http://127.0.0.1:8006/v1). Cached ~1 s. vLLM: num_requests_running +
+    num_requests_waiting (labelled lines). llama.cpp: requests_processing + requests_deferred (these
+    lines carry no labels, and the `# HELP`/`# TYPE` lines must not match). vLLM wins when present.
+    None when unreadable (neither format, seat down) — callers must treat None as "unknown",
+    never as idle."""
     if not endpoint:
         return None
     base = endpoint.rstrip("/")
@@ -148,13 +151,20 @@ def seat_load(endpoint: str | None, timeout: float = 0.5) -> int | None:
     try:
         with urllib.request.urlopen(base + "/metrics", timeout=timeout) as r:  # noqa: S310
             running = waiting = None
+            processing = deferred = None
             for line in r.read().decode("utf-8", "replace").splitlines():
                 if line.startswith("vllm:num_requests_running{") and running is None:
                     running = float(line.rsplit(" ", 1)[-1])
                 elif line.startswith("vllm:num_requests_waiting{") and waiting is None:
                     waiting = float(line.rsplit(" ", 1)[-1])
+                elif line.startswith("llamacpp:requests_processing ") and processing is None:
+                    processing = float(line.rsplit(" ", 1)[-1])
+                elif line.startswith("llamacpp:requests_deferred ") and deferred is None:
+                    deferred = float(line.rsplit(" ", 1)[-1])
             if running is not None:
                 load = int(running + (waiting or 0))
+            elif processing is not None:
+                load = int(processing + (deferred or 0))
     except Exception:
         load = None
     _load_cache[base] = (time.monotonic(), load)
