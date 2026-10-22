@@ -511,10 +511,10 @@ def _load_toml(path: Path) -> dict:
 # available" from keys alone — the runtime config need not list any cloud backend.
 _ANTHROPIC_LADDER = (
     # name,            model,               aliases,             price_in, price_out, context
-    ("cloud-small",    "claude-haiku-4-5",  ("haiku",),           1.0,  5.0,   200_000),
-    ("cloud-medium",   "claude-sonnet-5",   ("sonnet",),          3.0,  15.0,  1_000_000),
+    ("cloud-small",    "claude-haiku-5-5",  ("haiku",),           1.0,  5.0,   200_000),   # Haiku 5.5 since 2026-10-22 (4.5 prices; 5.5 list price unverified)
+    ("cloud-medium",   "claude-sonnet-5-5", ("sonnet",),          3.0,  15.0,  1_000_000),   # Sonnet 5.5 since 2026-10-22 (Sonnet 5 prices; unverified)
     ("cloud-large",    "claude-opus-5-5",   ("opus", "claude"),   4.0,  20.0,  1_000_000),   # Opus 5.5 since 2026-09-22 ($4/$20, cache read $0.20)
-    ("cloud-exquisite", "claude-fable-5",   ("fable", "flagship", "exquisite"),         10.0, 50.0,  1_000_000),
+    ("cloud-exquisite", "claude-fable-5-1", ("fable", "flagship", "exquisite"),         10.0, 50.0,  1_000_000),   # Fable 5.1 since 2026-10-22 (Fable 5 prices; unverified)
 )
 
 
