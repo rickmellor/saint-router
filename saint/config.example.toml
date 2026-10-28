@@ -206,3 +206,19 @@ prompt_storage = "full"   # "full" | "hashed" | "none"
                           # full:   readable later; useful for relabeling and future training
                           # hashed: SHA-256 only; deduplication possible without retaining content
                           # none:   metadata only (latency, tokens, decisions)
+
+# ---- Toolwatch (optional) ----------------------------------------------
+# Passive audit of the tool calls the models RETURN (the `curl https://…` kind) and the hosts
+# they name, into the netwatch PostgreSQL database. SAINT is the only place every local-model
+# response passes through, and the shell that runs the call may be on a host the network
+# monitoring cannot see. Nothing blocks, nothing alerts — a row per tool call that names a host
+# or comes from a shell-ish tool. Reads response text only: never resolves a name, never opens a
+# socket (other than its own Postgres connection). Off by default; it stores command text.
+[toolwatch]
+enabled           = false
+dsn_env           = "NW_DSN"   # env var holding the netwatch DSN (systemd EnvironmentFile).
+                               # enabled with the var unset => rows are dropped and counted in
+                               # /status; the router still starts.
+max_command_chars = 2000       # command excerpt stored per row
+queue_size        = 1000       # rows buffered in memory while the sink writes; full => drop
+

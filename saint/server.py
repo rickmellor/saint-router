@@ -437,6 +437,28 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
         from saint.bedrock_auth import apply_bedrock_auth_patch
         apply_bedrock_auth_patch()
 
+    # Passive tool-call audit → netwatch (saint/toolwatch.py). Off by default; when the DSN env
+    # var is missing we still build the sink (rows are dropped and counted in /status) rather
+    # than refuse to start — an audit sidecar must never take the router down.
+    from saint.toolwatch import ToolWatch as _ToolWatch
+    _tw_dsn = os.environ.get(cfg.toolwatch.dsn_env) if cfg.toolwatch.enabled else None
+    if cfg.toolwatch.enabled and not _tw_dsn:
+        print(f"[saint] toolwatch enabled but {cfg.toolwatch.dsn_env} is unset — "
+              "tool-call rows will be dropped", file=sys.stderr, flush=True)
+    app.state.toolwatch = _ToolWatch(cfg.toolwatch, _tw_dsn)
+
+    def _tw_emit(*, api, attr, request, backend, model, calls):
+        """Toolwatch hook — audit only, so it can never change a response or a status code."""
+        try:
+            from saint import toolwatch as _tw
+            _tw.emit(app.state.toolwatch, api=api, attr=attr,
+                     client=_usage.client_label(cfg, request.headers.get("user-agent")),
+                     peer=(request.client.host if request.client else None),
+                     backend=backend, model=model, calls=calls,
+                     max_command_chars=cfg.toolwatch.max_command_chars)
+        except Exception:
+            pass
+
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
         ids = ["saint-auto", "saint-explain", *(f"saint-{name}" for name in cfg.backends)]
@@ -687,7 +709,11 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                          price_in=b.price_in, price_out=b.price_out,
                          rank=100 + (b.price_in or 0.0))   # cost-ascending for hotkeys
             choices.append(e)
-        return {"profile": profile, "choices": choices}
+        try:
+            tw_stats = app.state.toolwatch.stats()
+        except Exception:
+            tw_stats = {"enabled": False}
+        return {"profile": profile, "choices": choices, "toolwatch": tw_stats}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Any:
@@ -814,6 +840,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 error_kind_local: str | None = None
                 success_local = False
                 import json as _json
+                from saint.toolwatch import OpenAIToolTracker as _OpenAIToolTracker
+                tw_tracker = _OpenAIToolTracker()
 
                 def _emit(chunk):
                     nonlocal tokens_in_total, tokens_out_total, cache_read_total, cache_write_total
@@ -823,6 +851,7 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                         chunk_dict = chunk
                     else:
                         chunk_dict = dict(chunk)
+                    tw_tracker.feed_chunk(chunk_dict)   # audit; never raises
                     usage = chunk_dict.get("usage") or {}
                     tokens_in_total = max(tokens_in_total, usage.get("prompt_tokens", 0) or 0)
                     tokens_out_total = max(tokens_out_total, usage.get("completion_tokens", 0) or 0)
@@ -864,6 +893,11 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                     ))
                     _provide(eff_final, elapsed_ms, ttft_ms, tokens_in_total or None,
                              tokens_out_total or None, success_local)
+                    # Toolwatch: finalise in the finally so a client disconnect still records
+                    # the tool calls that were already relayed.
+                    _tw_emit(api="openai", attr=attr, request=request,
+                             backend=served_final, model=model_field,
+                             calls=tw_tracker.finish())
                     _emit_summary(decision, model_field, elapsed_ms,
                                   cache_read=cache_read_total or None,
                                   cache_write=cache_write_total or None,
@@ -930,6 +964,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
             if _is_pool_unavailable(error_kind): return _pool_response(error_kind)
             raise HTTPException(status_code=502, detail=f"backend error: {error_kind}")
         payload = response if isinstance(response, dict) else response.model_dump()
+        from saint.toolwatch import calls_from_openai_payload
+        _tw_emit(api="openai", attr=attr, request=request, backend=served, model=model_field,
+                 calls=calls_from_openai_payload(payload))
         return JSONResponse(content=payload,
                             headers=_route_headers(decision, served, eff))
 
@@ -1119,6 +1156,8 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
 
             async def gen():
                 tracker = SseUsageTracker()
+                from saint.toolwatch import AnthropicToolTracker as _AnthropicToolTracker
+                tw_tracker = _AnthropicToolTracker()   # same bytes, audit only, never raises
                 dedupe = _MessageStartDedupe()   # litellm's messages→completion translation emits
                                                  # message_start twice; Anthropic clients expect one
                 success_local = False
@@ -1126,11 +1165,13 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                 try:
                     if first_chunk is not None:
                         tracker.feed(first_chunk)
+                        tw_tracker.feed(first_chunk)
                         out0 = dedupe.feed(first_chunk)
                         if out0:
                             yield out0
                         async for chunk in upstream:
                             tracker.feed(chunk)
+                            tw_tracker.feed(chunk)
                             out = dedupe.feed(chunk)   # ORIGINAL bytes, minus a repeated message_start
                             if out:
                                 yield out
@@ -1159,6 +1200,11 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                                            tracker.usage.get("input_tokens"),
                                            tracker.usage.get("output_tokens"),
                                            success_local)
+                    # Toolwatch: finalised in the finally, so a client disconnect mid-stream
+                    # still records the tool calls that were already relayed.
+                    _tw_emit(api="anthropic", attr=attr, request=request,
+                             backend=result.backend, model=client_model,
+                             calls=tw_tracker.calls)
                     _emit_summary(decision, client_model or "anthropic-messages",
                                   elapsed_ms,
                                   cache_read=tracker.usage.get("cache_read_input_tokens"),
@@ -1205,6 +1251,9 @@ def build_app(cfg: Config, *, db_path: Path) -> FastAPI:
                       served=result.backend)
         payload = (result.value if isinstance(result.value, dict)
                    else result.value.model_dump())
+        from saint.toolwatch import calls_from_anthropic_payload
+        _tw_emit(api="anthropic", attr=attr, request=request, backend=result.backend,
+                 model=client_model, calls=calls_from_anthropic_payload(payload))
         return JSONResponse(content=payload,
                             headers=_route_headers(decision, result.backend, result.eff))
 

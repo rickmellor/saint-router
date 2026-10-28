@@ -20,6 +20,7 @@ dependencies = [
     "orjson>=3.9",  # litellm's Anthropic passthrough STREAMING imports litellm.proxy.* which needs
     "backoff>=2.2", # these two (ModuleNotFoundError/ImportError on every streamed /v1/messages
                     # cloud call otherwise — fell back to local silently, 2026-08-27)
+    "psycopg[binary]>=3.1",  # toolwatch sink (netwatch tool_calls)
 ]
 
 [project.optional-dependencies]

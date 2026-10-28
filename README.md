@@ -292,6 +292,22 @@ provably sum to the net. `--json` for monitoring jobs. Cache advantage can be ne
 Log lifecycle: `saint log clear` (reset), `saint log prune --days N` (age out old rows;
 rows the classifier trainer can still use are preserved by default).
 
+### Toolwatch — the hosts the models' tool calls name
+
+`[toolwatch] enabled = true` records every tool call the routed models RETURN — the
+`curl https://oss-cn-beijing.aliyuncs.com/` kind — plus the hosts its arguments name, into the
+`netwatch` PostgreSQL table `tool_calls` (DSN in `NW_DSN`; see `saint/toolwatch.py`). SAINT is
+the only place every local-model response passes through, and the shell executing the call may
+be on a host the network monitoring cannot see, so the response text is the only reliable record
+of the destination. One row per call that names a host or comes from a shell-ish tool, with the
+peer IP, session/job/origin attribution, the serving backend and the client's model string.
+
+Passive by construction: nothing blocks, nothing alerts, no name is ever resolved, and a
+toolwatch failure can never change a response or a status code. Host extraction is text-only and
+deliberately noisy (a last-label stoplist drops `run.py`, `os.path`, `foo.service`); what counts
+as external or watched is the database's decision. Off by default because it stores command text.
+`GET /status` → `"toolwatch"` reports `queued/written/dropped/enabled`.
+
 ## Privacy
 
 Your prompts only go to backends you list in `[backends]`. The system honors what you

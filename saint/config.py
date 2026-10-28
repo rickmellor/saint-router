@@ -187,6 +187,17 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class ToolwatchConfig:
+    """Passive audit of the tool calls models emit (saint/toolwatch.py). Rows go to the
+    netwatch PostgreSQL database; nothing here blocks or alerts. Off by default — it stores
+    command text, so it is a deliberate opt-in per host."""
+    enabled: bool = False
+    dsn_env: str = "NW_DSN"        # env var holding the netwatch DSN; read at app start
+    max_command_chars: int = 2000  # command excerpt length per row
+    queue_size: int = 1000         # in-memory rows buffered while the sink writes
+
+
+@dataclass(frozen=True)
 class CacheConfig:
     """Routing decision caches + provider prompt caching (agent-loop economics).
 
@@ -238,6 +249,7 @@ class Config:
     cache: CacheConfig = CacheConfig()
     bedrock: BedrockConfig | None = None  # SSO recovery knobs; optional
     energy: EnergyConfig = EnergyConfig()
+    toolwatch: ToolwatchConfig = ToolwatchConfig()
     clients: tuple[ClientRule, ...] = ()  # User-Agent → backend rules; first match (config order) wins
 
     @property
@@ -701,6 +713,14 @@ def load_config(path: Path) -> Config:
         baseline=en_raw.get("baseline"),
     )
 
+    tw_raw = raw.get("toolwatch", {})
+    toolwatch = ToolwatchConfig(
+        enabled=bool(tw_raw.get("enabled", False)),
+        dsn_env=str(tw_raw.get("dsn_env", "NW_DSN")),
+        max_command_chars=int(tw_raw.get("max_command_chars", 2000)),
+        queue_size=int(tw_raw.get("queue_size", 1000)),
+    )
+
     clients = tuple(
         ClientRule(name=str(c.get("name", "")), user_agent=str(c.get("user_agent", "")),
                    backend=str(c.get("backend", "")))
@@ -717,6 +737,7 @@ def load_config(path: Path) -> Config:
         cache=cache,
         bedrock=bedrock,
         energy=energy,
+        toolwatch=toolwatch,
         clients=clients,
     )
     errors = _validate(cfg)
