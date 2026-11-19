@@ -16,7 +16,7 @@ from saint.classifier import (
     load_prompt_template,
 )
 from saint.capabilities import required_capabilities
-from saint.config import BackendConfig, Config
+from saint.config import BackendConfig, Config, resolve_backend
 from saint.policy import resolve_policy
 from saint.prefixes import ParsedPrefixes, parse_prefixes
 from saint.route_cache import (
@@ -275,8 +275,12 @@ async def decide_route(
     pinned_via_model: str | None = None
     if model_field.startswith(SAINT_PREFIX) and model_field not in (SAINT_AUTO, SAINT_EXPLAIN):
         candidate = model_field[len(SAINT_PREFIX):]
-        if candidate in cfg.backends:
-            pinned_via_model = candidate
+        # Backend names AND aliases pin, like !<token> prefixes do — so a renamed backend
+        # (local-coder -> local-worker1, 2026-11-18) keeps serving its old `saint-<old>` ids
+        # instead of silently auto-routing them.
+        resolved = resolve_backend(cfg, candidate)
+        if resolved is not None:
+            pinned_via_model = resolved.name
 
     # prefix pin takes precedence over model-field pin
     pinned = parsed.pinned_backend or pinned_via_model

@@ -73,6 +73,18 @@ async def test_decide_pinned_by_model_field():
     assert decision.pinned_backend == "cloud-large"
 
 
+async def test_decide_pinned_by_model_field_alias():
+    # saint-<alias> pins like saint-<name> does (renamed backends keep their old ids)
+    cfg = _cfg()
+    decision = await decide_route(
+        cfg=cfg, model_field="saint-opus",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert decision.mode == "dispatch"
+    assert decision.backend == "cloud-large"
+    assert decision.pinned_backend == "cloud-large"
+
+
 async def test_decide_pinned_by_prefix_overrides_model_field():
     cfg = _cfg()
     decision = await decide_route(
