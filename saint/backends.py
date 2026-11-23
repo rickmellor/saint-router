@@ -194,7 +194,8 @@ def _provider_kwargs(backend: BackendConfig) -> dict[str, Any]:
 
 def _shape_request(backend: BackendConfig, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Per-backend request shaping: drop model-forbidden params; inject a default
-    max_tokens only when the client omitted one (Bedrock/Anthropic require it)."""
+    max_tokens only when the client omitted one (Bedrock/Anthropic require it); merge the
+    backend's `chat_template_kwargs` defaults under the client's own."""
     for k in backend.drop_params:
         kwargs.pop(k, None)
     # Anthropic rejects `temperature` outright on the Claude 5 family ("`temperature` is
@@ -209,11 +210,24 @@ def _shape_request(backend: BackendConfig, kwargs: dict[str, Any]) -> dict[str, 
         kwargs.setdefault("max_tokens", backend.default_max_tokens)
     # chat_template_kwargs is a vLLM/llama.cpp extension, not an OpenAI param: litellm only
     # delivers it inside `extra_body`, and Anthropic/Bedrock reject it outright.
+    # A backend may set defaults in config (`chat_template_kwargs = { reasoning_effort = "medium" }`)
+    # because a seat's chat template has its own defaults that hurt — the RTX text seat's template
+    # defaults reasoning_effort to `xhigh`, so an unpinned Claude Code docs turn wrote 433K chars of
+    # thinking for 1.5K of text (2026-11-23). Merge rule: backend defaults first, the client's keys
+    # on top, so a client that only sends `{"enable_thinking": false}` still gets the backend's
+    # reasoning_effort. A non-dict client value is passed through untouched, as before.
     ctk = kwargs.pop("chat_template_kwargs", None)
-    if ctk and backend.provider not in ("anthropic", "bedrock"):
-        extra = dict(kwargs.get("extra_body") or {})
-        extra.setdefault("chat_template_kwargs", ctk)
-        kwargs["extra_body"] = extra
+    if backend.provider not in ("anthropic", "bedrock"):
+        if isinstance(ctk, dict):
+            merged = {**backend.chat_template_kwargs_map, **ctk}
+        elif ctk is None:
+            merged = backend.chat_template_kwargs_map
+        else:
+            merged = ctk                        # not a dict: pass through unchanged, no merge
+        if merged:
+            extra = dict(kwargs.get("extra_body") or {})
+            extra.setdefault("chat_template_kwargs", merged)
+            kwargs["extra_body"] = extra
     # vLLM request priority (lower = scheduled sooner; needs `--scheduling-policy priority` on the seat).
     # Per-backend `priority` stamps the role's work — chat 0 / coder 5 / worker 10 — so an interactive turn
     # jumps a fan-out's collectors on a shared seat (2026-09-23, all-seats spill). A client-sent `priority` wins.

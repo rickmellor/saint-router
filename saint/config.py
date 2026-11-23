@@ -5,7 +5,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from saint.capabilities import KNOWN_CAPABILITIES
 
@@ -54,6 +54,13 @@ class BackendConfig:
     spill_max_prompt: int | None = None
     # vLLM request priority for this backend's work (lower = sooner; seats need --scheduling-policy priority).
     priority: int | None = None
+    # Per-backend defaults for the vLLM/llama.cpp `chat_template_kwargs` extension, from a TOML
+    # table on the backend. Stored as SORTED (key, value) pairs rather than a dict so the frozen
+    # BackendConfig stays hashable and keeps a stable repr/==; read it back with
+    # `.chat_template_kwargs_map`. Merged UNDER the client's own value (a client key wins per key).
+    # Never sent to anthropic/bedrock. See saint/backends.py::_shape_request. (Values pass through
+    # as TOML gave them; a nested table would make the instance unhashable — nothing hashes these.)
+    chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
     # --- provider = "bedrock" only (validated) ---
     aws_region: str | None = None       # REQUIRED for bedrock backends
     aws_profile: str | None = None      # AWS profile (credential_process/SSO); omit = default chain
@@ -85,6 +92,11 @@ class BackendConfig:
     @property
     def is_pool(self) -> bool:
         return bool(self.pool)
+
+    @property
+    def chat_template_kwargs_map(self) -> dict[str, Any]:
+        """This backend's `chat_template_kwargs` defaults as a dict (see the field above)."""
+        return dict(self.chat_template_kwargs)
 
     @property
     def johnny_bound(self) -> bool:
@@ -285,6 +297,21 @@ def _read_capabilities(backend: str, provider: str | None, raw: dict) -> tuple[s
     return tuple(str(cap) for cap in value)
 
 
+def _read_template_kwargs(backend: str, raw: dict) -> tuple[tuple[str, Any], ...]:
+    """`chat_template_kwargs` from a [backends.X] table: an inline TOML table of template
+    knobs. Stored sorted as (key, value) pairs so the frozen BackendConfig stays hashable."""
+    value = raw.get("chat_template_kwargs")
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ConfigError(f"backend '{backend}' chat_template_kwargs must be a table, "
+                          f'e.g. chat_template_kwargs = {{ reasoning_effort = "medium" }}')
+    for k in value:
+        if not isinstance(k, str):
+            raise ConfigError(f"backend '{backend}' chat_template_kwargs keys must be strings")
+    return tuple(sorted((str(k), v) for k, v in value.items()))
+
+
 DOMAINS = ("code", "general")
 COMPLEXITIES = ("trivial", "medium", "hard")
 URGENCIES = ("normal", "urgent", "patient")
@@ -435,6 +462,9 @@ def _validate(cfg: Config) -> list[str]:
                               f"is '{b.provider}' (bedrock only)")
         if b.default_max_tokens is not None and b.default_max_tokens < 1:
             errors.append(f"backend '{name}' default_max_tokens must be >= 1")
+        if b.chat_template_kwargs and b.provider in ("anthropic", "bedrock"):
+            errors.append(f"backend '{name}' chat_template_kwargs does not apply to provider "
+                          f"'{b.provider}' (a vLLM/llama.cpp extension — it is never sent)")
     if cfg.bedrock is not None:
         if cfg.bedrock.sso_check_timeout_s <= 0:
             errors.append("bedrock.sso_check_timeout_s must be > 0")
@@ -476,6 +506,8 @@ def _validate(cfg: Config) -> list[str]:
             errors.append(f"backend '{name}' is a pool; set johnny_role/johnny_seat on its members, not the pool")
         if b.spill:
             errors.append(f"backend '{name}' is a pool; 'spill' does not apply (the pool walks its members)")
+        if b.chat_template_kwargs:
+            errors.append(f"backend '{name}' is a pool; set chat_template_kwargs on its members, not the pool")
         if b.local_only and b.on_error:
             errors.append(f"backend '{name}' local_only = true rejects on_error (a pool must not leave the pool)")
 
@@ -584,6 +616,7 @@ def load_config(path: Path) -> Config:
             spill_max_prompt=(int(b["spill_max_prompt"])
                               if b.get("spill_max_prompt") is not None else None),
             priority=int(b["priority"]) if b.get("priority") is not None else None,
+            chat_template_kwargs=_read_template_kwargs(name, b),
             aws_region=b.get("aws_region"),
             aws_profile=b.get("aws_profile"),
             drop_params=tuple(b.get("drop_params", ())),
